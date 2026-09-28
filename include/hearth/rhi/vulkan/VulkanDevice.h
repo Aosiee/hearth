@@ -162,10 +162,14 @@ namespace TinyEngine {
 			std::string Name;
 			uint32_t BeginQuery;
 			uint32_t EndQuery;
+			uint32_t ProfilerFrameIndex = 0; // the submit-time frame
 		};
 
 		bool m_TimestampsSupported = false;
 		float m_TimestampPeriodNs = 1.0f;
+	public:
+		float GetTimestampPeriodNs() const { return m_TimestampPeriodNs; }
+	private:
 
 		std::vector<VkQueryPool> m_TimestampPools;
 		std::vector<uint32_t> m_NextQuerySlot;

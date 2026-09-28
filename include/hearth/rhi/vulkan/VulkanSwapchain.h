@@ -10,7 +10,7 @@ namespace TinyEngine {
 	// Owns the window's VkSurfaceKHR, its VkSwapchainKHR, and the sync objects
 	// needed to safely acquire and present images. One of these exists per
 	// window, borrowing a VulkanDevice that may be shared by several windows
-	// (relevant when ImGui multi-viewport gives every detached panel its own
+	// (relevant when the UI layer gives every detached panel its own
 	// window and swapchain).
 	class VulkanSwapchain
 	{

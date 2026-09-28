@@ -7,8 +7,14 @@ namespace TinyEngine {
 	{
 		m_Device = &device;
 
+		// A single push-constant range. Stage flags default to VERTEX_BIT;
+		// P4's overlay pipelines set them to VERTEX_BIT | FRAGMENT_BIT so the
+		// fragment stage can read a discard-mode value at an offset past the
+		// vertex mat4 (see VulkanPipeline.h). One range (never two) avoids the
+		// overlapping-range push VUID (VUID-vkCmdPushConstants-offset-01796)
+		// that two per-stage ranges sharing byte 0 would trigger.
 		VkPushConstantRange pushConstantRange{};
-		pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+		pushConstantRange.stageFlags = spec.PushConstantStages;
 		pushConstantRange.offset = 0;
 		pushConstantRange.size = spec.PushConstantSize;
 
@@ -97,7 +103,7 @@ namespace TinyEngine {
 				// Leave the destination alpha untouched (outline composite):
 				// the colour still blends normally, but the alpha channel of
 				// the already-rendered opaque display target stays 1.0, so
-				// ImGui's own SRC_ALPHA blending of that texture doesn't show
+				// the UI layer's own SRC_ALPHA blending of that texture doesn't show
 				// the window background through the non-outline pixels.
 				blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
 				blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;

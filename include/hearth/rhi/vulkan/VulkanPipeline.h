@@ -36,8 +36,17 @@ namespace TinyEngine {
 
 		VkDescriptorSetLayout DescriptorSetLayout = VK_NULL_HANDLE;
 
-		// Vertex stage only for now (a single MVP matrix), see VulkanPipeline.cpp.
+		// The pipeline's single push-constant range. Vertex stage only by
+		// default (a single MVP matrix), see VulkanPipeline.cpp. P4's overlay
+		// discard mode needs the FRAGMENT stage to read a value too: GLSL
+		// push-constant blocks always begin at offset 0 per stage, so the two
+		// stages' blocks would overlap in the push-constant buffer. The clean
+		// resolution is ONE range whose size covers the shared block
+		// (e.g. mat4 + uint = 68 bytes) and whose stageFlags cover BOTH
+		// stages - set PushConstantStages accordingly. Every vkCmdPushConstants
+		// against that layout then uses the combined stage flags.
 		uint32_t PushConstantSize = 0;
+		VkShaderStageFlags PushConstantStages = VK_SHADER_STAGE_VERTEX_BIT;
 
 		VkFormat ColorAttachmentFormat = VK_FORMAT_UNDEFINED;
 		bool EnableBlend = true;
@@ -51,7 +60,7 @@ namespace TinyEngine {
 		// alpha blend would otherwise overwrite that alpha with the
 		// composite's own output alpha - which is 0 for non-edge pixels
 		// (vec4(0.0)), making the whole viewport texture transparent to
-		// ImGui's SRC_ALPHA blending and showing the window's grey background
+		// the UI layer's SRC_ALPHA blending and showing the window's grey background
 		// through everything except the outline.
 		bool PreserveDestinationAlpha = false;
 

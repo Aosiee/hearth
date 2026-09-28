@@ -2,6 +2,7 @@
 #include "Platform/Vulkan/VulkanDevice.h"
 #include "Platform/Vulkan/VulkanFrameContext.h"
 #include "TinyEngine/Debug/GpuFrameDebugData.h"
+#include "TinyEngine/Debug/Profiler.h"
 
 #include <GLFW/glfw3.h>
 #include <cstring>
@@ -316,6 +317,13 @@ namespace TinyEngine {
 		vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 		vulkan13Features.dynamicRendering = VK_TRUE;
 		vulkan13Features.synchronization2 = VK_TRUE;
+		// The gizmo overlay fragment shader uses `discard` alongside fwidth()
+		// derivatives; glslang emits OpDemoteToHelperInvocation for that
+		// combination (demote keeps helper invocations alive so the
+		// derivative is still correct), which needs this feature enabled.
+		// Core in Vulkan 1.3 (promoted from VK_EXT_shader_demote_to_helper_invocation),
+		// universally supported on 1.3-capable hardware.
+		vulkan13Features.shaderDemoteToHelperInvocation = VK_TRUE;
 
 		VkPhysicalDeviceVulkan12Features vulkan12Features{};
 		vulkan12Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
@@ -550,7 +558,8 @@ namespace TinyEngine {
 				std::string scopeName = m_ScopeNameStack[frameIndex].back();
 				m_ScopeNameStack[frameIndex].pop_back();
 
-				m_RecordedScopes[frameIndex].push_back({ scopeName, beginSlot, endSlot });
+				uint32_t profilerFrame = TinyEngine::Profiler::Get().CurrentFrameIndex();
+				m_RecordedScopes[frameIndex].push_back({ scopeName, beginSlot, endSlot, profilerFrame });
 			}
 		}
 
@@ -579,11 +588,20 @@ namespace TinyEngine {
 			if (result == VK_SUCCESS)
 			{
 				debugInfo.PassTimings.clear();
+				// The profiler's GPU lane: the tick pairs + the
+				// originating frame, in the device-ns domain (the
+				// viewer anchors on the frame; the tooltip converts via
+				// the period).
 				for (const GpuScopeRecord& scope : m_RecordedScopes[frameIndex])
 				{
 					uint64_t deltaTicks = timestamps[scope.EndQuery] - timestamps[scope.BeginQuery];
 					float ms = (float)((double)deltaTicks * m_TimestampPeriodNs / 1000000.0);
 					debugInfo.PassTimings.push_back({ scope.Name, ms });
+
+					TinyEngine::Profiler::Get().GpuPassPair(0,
+						(uint64_t)((double)timestamps[scope.BeginQuery] * m_TimestampPeriodNs),
+						(uint64_t)((double)timestamps[scope.EndQuery] * m_TimestampPeriodNs),
+						scope.ProfilerFrameIndex, scope.Name.c_str());
 				}
 
 				debugInfo.Available = true;
