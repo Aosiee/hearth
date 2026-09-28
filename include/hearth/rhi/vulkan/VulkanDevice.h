@@ -7,7 +7,7 @@ struct GLFWwindow;
 namespace TinyEngine {
 
 	// Owns everything about the Vulkan backend that exists once for the whole
-	// application: the instance, the physical/logical device pair we picked, the
+	// application: the instance, the physical/logical device pair, the
 	// graphics queue, the VMA allocator, and one command pool per frame in flight.
 	//
 	// Nothing in here is tied to a particular window or swapchain, that lives in
@@ -16,11 +16,28 @@ namespace TinyEngine {
 	class VulkanDevice
 	{
 	public:
-		// How many frames worth of command pools/buffers we keep alive at once, so
-		// recording frame N+1 never has to wait on frame N's GPU work to actually
-		// finish first. Two is a plain double buffer; going higher trades a little
-		// latency for smoother pacing when frame times are uneven.
+		// How many frames worth of command pools/buffers are kept alive at once,
+		// so recording frame N+1 never has to wait on frame N's GPU work to
+		// actually finish first. Two is a plain double buffer; going higher
+		// trades a little latency for smoother pacing when frame times are
+		// uneven.
 		static constexpr uint32_t FramesInFlight = 2;
+
+		// Multi-window slotting: the shared device hands each window a *slot*
+		// of FramesInFlight per-frame resources (command pools, timestamp
+		// pools, profiling bookkeeping). The frame-index space every
+		// per-frame-in-flight array in the backend is sized against is
+		// TotalFrameSlots; a window's frame N lives at slot*FramesInFlight+N.
+		// The fixed slot count is a v1 simplification - per-window ownership
+		// replaces the slotting wholesale rather than this becoming dynamic.
+		static constexpr uint32_t MaxWindowSlots = 4;
+		static constexpr uint32_t TotalFrameSlots = FramesInFlight * MaxWindowSlots;
+
+		// Reserves the next window slot and returns its base frame index
+		// (slotIndex * FramesInFlight). Must be called between frames (a
+		// window's VulkanContext::Init), never while another window's
+		// submission is in flight. Asserts when the cap is exceeded.
+		uint32_t AllocateWindowSlot();
 
 		// windowForExtensionQuery is only used to ask GLFW which instance extensions
 		// this windowing system needs (X11/Wayland/Win32 surface support etc). No
@@ -35,7 +52,11 @@ namespace TinyEngine {
 		uint32_t GetGraphicsQueueFamily() const { return m_GraphicsQueueFamily; }
 		VmaAllocator GetAllocator() const { return m_Allocator; }
 
-		VkCommandPool GetCommandPool(uint32_t frameIndex) const { return m_CommandPools[frameIndex]; }
+		VkCommandPool GetCommandPool(uint32_t frameIndex) const
+		{
+			TE_CORE_ASSERT(frameIndex < m_CommandPools.size() && m_CommandPools[frameIndex] != VK_NULL_HANDLE, "Command pool index out of range!");
+			return m_CommandPools[frameIndex];
+		}
 
 		bool IsValidationEnabled() const { return m_ValidationEnabled; }
 
@@ -50,15 +71,14 @@ namespace TinyEngine {
 		// Thin wrapper over vkSetDebugUtilsObjectNameEXT. Safe to call even when
 		// validation/debug utils aren't active, it just becomes a no-op, so callers
 		// don't need to guard every call site themselves. This is what makes a
-		// RenderDoc/Nsight capture (and later the in-editor GPU frame debugger)
-		// show real names instead of raw handles.
+		// RenderDoc/Nsight capture and the in-editor GPU frame debugger show real
+		// names instead of raw handles.
 		void SetObjectName(VkObjectType type, uint64_t handle, const std::string& name) const;
 
 		// Wraps a stretch of recorded commands in a named, coloured label. Shows up
 		// as a group in RenderDoc/Nsight captures. Also where GPU timing for the
-		// in-editor GPU frame debugger comes from — every existing Begin/End call
-		// site got per-pass GPU timestamps for free once this was added here, none
-		// of them needed touching individually.
+		// in-editor GPU frame debugger comes from - every Begin/End call site
+		// gets per-pass GPU timestamps.
 		void CmdBeginDebugLabel(VkCommandBuffer commandBuffer, const std::string& name, const float colour[4] = nullptr);
 		void CmdEndDebugLabel(VkCommandBuffer commandBuffer);
 
@@ -68,7 +88,10 @@ namespace TinyEngine {
 		// timestamps from the *previous* time this slot was used (guaranteed
 		// complete by the fence wait) into GpuFrameDebugInfo, then clears this
 		// slot's bookkeeping ready for new Begin/EndDebugLabel calls this frame.
-		void BeginProfilingFrame(uint32_t frameIndex);
+		// isMainWindow gates the GpuFrameDebugInfo sink (a single global the
+		// editor's GPU frame debugger reads) - secondary windows still get
+		// their own per-slot bookkeeping, they just don't publish into it.
+		void BeginProfilingFrame(uint32_t frameIndex, bool isMainWindow = true);
 
 		// Must be the first recorded command for this frame's command buffer,
 		// after BeginProfilingFrame has already read back its previous
@@ -119,16 +142,19 @@ namespace TinyEngine {
 
 		VmaAllocator m_Allocator = VK_NULL_HANDLE;
 
-		VkCommandPool m_CommandPools[FramesInFlight] = {};
+		std::vector<VkCommandPool> m_CommandPools;
 		VkCommandPool m_TransientCommandPool = VK_NULL_HANDLE;
+
+		uint32_t m_NextWindowSlot = 0;
 
 		bool m_ValidationEnabled = false;
 		bool m_SamplerAnisotropySupported = false;
 
 		// GPU frame debugger timing.
-		// One query pool per frame in flight, same reasoning as the command
-		// pools: reusing slot N is only safe once frame N's fence has
-		// signalled, which BeginProfilingFrame's caller already guarantees.
+		// One query pool per frame slot (window slot * FramesInFlight), same
+		// reasoning as the command pools: reusing slot N is only safe once
+		// frame N's fence has signalled, which BeginProfilingFrame's caller
+		// already guarantees.
 		static constexpr uint32_t kMaxTimestampsPerFrame = 64;
 
 		struct GpuScopeRecord
@@ -141,11 +167,11 @@ namespace TinyEngine {
 		bool m_TimestampsSupported = false;
 		float m_TimestampPeriodNs = 1.0f;
 
-		VkQueryPool m_TimestampPools[FramesInFlight] = {};
-		uint32_t m_NextQuerySlot[FramesInFlight] = {};
-		std::vector<uint32_t> m_ScopeBeginStack[FramesInFlight];
-		std::vector<std::string> m_ScopeNameStack[FramesInFlight];
-		std::vector<GpuScopeRecord> m_RecordedScopes[FramesInFlight];
+		std::vector<VkQueryPool> m_TimestampPools;
+		std::vector<uint32_t> m_NextQuerySlot;
+		std::vector<std::vector<uint32_t>> m_ScopeBeginStack;
+		std::vector<std::vector<std::string>> m_ScopeNameStack;
+		std::vector<std::vector<GpuScopeRecord>> m_RecordedScopes;
 	};
 
 }

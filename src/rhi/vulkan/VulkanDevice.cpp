@@ -10,11 +10,10 @@ namespace TinyEngine {
 
 	namespace {
 
-		// The one and only validation layer we care about. If it isn't present on
-		// this machine (dev machine without the Vulkan SDK / LunarG layers
-		// installed) we just carry on without it rather than refusing to start,
-		// the same way the engine doesn't refuse to start without a debugger
-		// attached.
+		// The only validation layer used. If it isn't present on this machine
+		// (no Vulkan SDK / LunarG layers installed), startup carries on
+		// without it rather than refusing to start, the same way the engine
+		// doesn't refuse to start without a debugger attached.
 		const char* g_ValidationLayerName = "VK_LAYER_KHRONOS_validation";
 
 		// Kept separate from the log itself (Log.h has no ring buffer, and
@@ -154,7 +153,7 @@ namespace TinyEngine {
 		appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
 		appInfo.pEngineName = "TinyEngine";
 		appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-		// Vulkan 1.3 core is TinyEngine's confirmed baseline.
+		// Vulkan 1.3 core is the baseline.
 		// Dynamic rendering and synchronization2 are both used unconditionally as core
 		// features rather than extensions further down this backend.
 		appInfo.apiVersion = VK_API_VERSION_1_3;
@@ -179,9 +178,10 @@ namespace TinyEngine {
 		createInfo.enabledExtensionCount = (uint32_t)extensions.size();
 		createInfo.ppEnabledExtensionNames = extensions.data();
 
-		// Chaining a messenger create info onto the instance create info means we also
-		// catch validation messages raised by vkCreateInstance/vkDestroyInstance
-		// themselves, which the messenger object created afterwards would otherwise miss.
+		// Chaining a messenger create info onto the instance create info means
+		// validation messages raised by vkCreateInstance/vkDestroyInstance
+		// themselves are also caught, which the messenger object created
+		// afterwards would otherwise miss.
 		VkDebugUtilsMessengerCreateInfoEXT messengerCreateInfo{};
 		if (m_ValidationEnabled)
 		{
@@ -191,8 +191,8 @@ namespace TinyEngine {
 
 			// Verbose/info would also surface the loader's own manifest discovery
 			// chatter on every single run (which layers/drivers it found and where),
-			// not just messages from the validation layer itself. Warnings and
-			// errors are what we actually care about day to day.
+			// not just messages from the validation layer itself. Only warnings
+			// and errors are surfaced.
 			messengerCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
 			messengerCreateInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
 				| VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
@@ -241,7 +241,7 @@ namespace TinyEngine {
 			VkPhysicalDeviceProperties properties;
 			vkGetPhysicalDeviceProperties(device, &properties);
 
-			// Vulkan 1.3 core is a hard requirement, not something we fall back
+			// Vulkan 1.3 core is a hard requirement, not something to fall back
 			// from.
 			if (properties.apiVersion < VK_API_VERSION_1_3)
 				continue;
@@ -286,10 +286,10 @@ namespace TinyEngine {
 		TE_CORE_INFO(LogVulkan, "Vulkan Physical Device: {0}", properties.deviceName);
 
 		// Needed to convert GPU timestamp query results (raw ticks) into
-		// milliseconds for the GPU frame debugger. timestampValidBits == 0 on the
-		// chosen queue family would mean timestamps aren't supported there at
-		// all, rare but not impossible, checked rather than assumed the way
-		// samplerAnisotropy is.
+		// milliseconds for the GPU frame debugger. timestampValidBits == 0 on
+		// the chosen queue family would mean timestamps aren't supported there
+		// at all, rare but not impossible, checked rather than assumed the
+		// way samplerAnisotropy is.
 		m_TimestampPeriodNs = properties.limits.timestampPeriod;
 
 		uint32_t queueFamilyCount = 0;
@@ -310,9 +310,8 @@ namespace TinyEngine {
 
 		// Dynamic rendering and synchronization2 are Vulkan 1.3 core features rather
 		// than extensions, but still need to be explicitly turned on per device.
-		// Descriptor indexing and timeline semaphores (1.2 core) are enabled now too
-		// even though nothing uses them yet, they're needed from Renderer2D's
-		// bindless texture array onward.
+		// Descriptor indexing and timeline semaphores (1.2 core) are also
+		// enabled, for Renderer2D's bindless texture array.
 		VkPhysicalDeviceVulkan13Features vulkan13Features{};
 		vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 		vulkan13Features.dynamicRendering = VK_TRUE;
@@ -376,6 +375,8 @@ namespace TinyEngine {
 
 	void VulkanDevice::CreateCommandPools()
 	{
+		m_CommandPools.resize(TotalFrameSlots, VK_NULL_HANDLE);
+
 		VkCommandPoolCreateInfo poolCreateInfo{};
 		poolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
 		// Individually resettable so each frame's pool can be reset in one call once
@@ -383,10 +384,10 @@ namespace TinyEngine {
 		poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 		poolCreateInfo.queueFamilyIndex = m_GraphicsQueueFamily;
 
-		for (uint32_t i = 0; i < FramesInFlight; i++)
+		for (uint32_t i = 0; i < TotalFrameSlots; i++)
 		{
 			VK_CHECK(vkCreateCommandPool(m_Device, &poolCreateInfo, nullptr, &m_CommandPools[i]));
-			SetObjectName(VK_OBJECT_TYPE_COMMAND_POOL, (uint64_t)m_CommandPools[i], "Frame In Flight Command Pool " + std::to_string(i));
+			SetObjectName(VK_OBJECT_TYPE_COMMAND_POOL, (uint64_t)m_CommandPools[i], "Frame Slot Command Pool " + std::to_string(i));
 		}
 
 		VkCommandPoolCreateInfo transientPoolCreateInfo{};
@@ -403,6 +404,12 @@ namespace TinyEngine {
 
 	void VulkanDevice::CreateTimestampQueryPools()
 	{
+		m_TimestampPools.resize(TotalFrameSlots, VK_NULL_HANDLE);
+		m_NextQuerySlot.resize(TotalFrameSlots, 0);
+		m_ScopeBeginStack.resize(TotalFrameSlots);
+		m_ScopeNameStack.resize(TotalFrameSlots);
+		m_RecordedScopes.resize(TotalFrameSlots);
+
 		if (!m_TimestampsSupported)
 		{
 			TE_CORE_WARN(LogVulkan, "This GPU's graphics queue doesn't report timestampValidBits, the GPU frame debugger's pass timings will stay unavailable.");
@@ -414,7 +421,7 @@ namespace TinyEngine {
 		poolCreateInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
 		poolCreateInfo.queryCount = kMaxTimestampsPerFrame;
 
-		for (uint32_t i = 0; i < FramesInFlight; i++)
+		for (uint32_t i = 0; i < TotalFrameSlots; i++)
 		{
 			VK_CHECK(vkCreateQueryPool(m_Device, &poolCreateInfo, nullptr, &m_TimestampPools[i]));
 			SetObjectName(VK_OBJECT_TYPE_QUERY_POOL, (uint64_t)m_TimestampPools[i], "GPU Frame Debugger Timestamp Pool " + std::to_string(i));
@@ -427,6 +434,14 @@ namespace TinyEngine {
 			vkCmdResetQueryPool(cmd, m_TimestampPools[i], 0, kMaxTimestampsPerFrame);
 			EndSingleTimeCommands(cmd);
 		}
+	}
+
+	uint32_t VulkanDevice::AllocateWindowSlot()
+	{
+		TE_CORE_ASSERT(m_NextWindowSlot < MaxWindowSlots, "More windows than VulkanDevice::MaxWindowSlots allows!");
+		uint32_t base = m_NextWindowSlot * FramesInFlight;
+		m_NextWindowSlot++;
+		return base;
 	}
 
 	VkCommandBuffer VulkanDevice::BeginSingleTimeCommands() const
@@ -503,6 +518,7 @@ namespace TinyEngine {
 		if (m_TimestampsSupported)
 		{
 			uint32_t frameIndex = GetVulkanCurrentFrameIndex();
+			TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "CmdBeginDebugLabel frame index out of range!");
 			TE_CORE_ASSERT(m_NextQuerySlot[frameIndex] < kMaxTimestampsPerFrame, "GPU frame debugger ran out of timestamp query slots this frame, raise VulkanDevice::kMaxTimestampsPerFrame!");
 
 			uint32_t slot = m_NextQuerySlot[frameIndex]++;
@@ -517,6 +533,7 @@ namespace TinyEngine {
 		if (m_TimestampsSupported)
 		{
 			uint32_t frameIndex = GetVulkanCurrentFrameIndex();
+			TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "CmdEndDebugLabel frame index out of range!");
 
 			// Begin/EndDebugLabel calls are always properly paired at every
 			// call site in this codebase, but guard anyway rather than pop an
@@ -541,11 +558,12 @@ namespace TinyEngine {
 			vkCmdEndDebugUtilsLabelEXT(commandBuffer);
 	}
 
-	void VulkanDevice::BeginProfilingFrame(uint32_t frameIndex)
+	void VulkanDevice::BeginProfilingFrame(uint32_t frameIndex, bool isMainWindow)
 	{
+		TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "BeginProfilingFrame frame index out of range!");
 		GpuFrameDebugInfo& debugInfo = GetMutableGpuFrameDebugInfo();
 
-		if (m_TimestampsSupported && !m_RecordedScopes[frameIndex].empty())
+		if (isMainWindow && m_TimestampsSupported && !m_RecordedScopes[frameIndex].empty())
 		{
 			uint32_t queryCount = m_NextQuerySlot[frameIndex];
 			std::vector<uint64_t> timestamps(queryCount);
@@ -572,8 +590,11 @@ namespace TinyEngine {
 			}
 		}
 
-		debugInfo.FrameInFlightIndex = frameIndex;
-		debugInfo.Barriers.clear();
+		if (isMainWindow)
+		{
+			debugInfo.FrameInFlightIndex = frameIndex;
+			debugInfo.Barriers.clear();
+		}
 
 		m_NextQuerySlot[frameIndex] = 0;
 		m_RecordedScopes[frameIndex].clear();

@@ -10,7 +10,7 @@ namespace TinyEngine {
 	// Owns the window's VkSurfaceKHR, its VkSwapchainKHR, and the sync objects
 	// needed to safely acquire and present images. One of these exists per
 	// window, borrowing a VulkanDevice that may be shared by several windows
-	// (relevant once ImGui multi-viewport gives every detached panel its own
+	// (relevant when ImGui multi-viewport gives every detached panel its own
 	// window and swapchain).
 	class VulkanSwapchain
 	{
@@ -110,7 +110,7 @@ namespace TinyEngine {
 
 		// Tracks which frame's fence last used a given swapchain image, so that if
 		// acquire ever hands back an image that a different frame in flight is
-		// still using we wait on that first instead of racing it.
+		// still using, the wait is on that fence first instead of racing it.
 		std::vector<VkFence> m_ImagesInFlight;
 	};
 

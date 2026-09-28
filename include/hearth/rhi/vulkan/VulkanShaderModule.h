@@ -8,8 +8,8 @@ namespace TinyEngine {
 	// Thin wrapper over a single VkShaderModule. Takes already compiled SPIR-V,
 	// doesn't know or care how it got compiled, that's VulkanShaderCompiler's
 	// job (glslang based). Deliberately decoupled from the compiler so this
-	// class, and everything built on top of it (VulkanPipeline), doesn't change
-	// shape once the real build-time compile step lands.
+	// class, and everything built on top of it (VulkanPipeline), stays
+	// independent of how the SPIR-V was produced.
 	class VulkanShaderModule
 	{
 	public:

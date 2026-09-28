@@ -1,15 +1,15 @@
 #pragma once
 
-// Volk is our vendored, dynamically loaded Vulkan meta-loader (TinyEngine/vendor/volk).
-// We use it instead of linking directly against the system Vulkan loader so the engine
+// Volk is the vendored, dynamically loaded Vulkan meta-loader (third_party plugin).
+// It is used instead of linking directly against the system Vulkan loader so the engine
 // never has a build time dependency on the Vulkan SDK being installed. Including it here
 // also pulls in the real Vulkan-Headers (vendored separately), which is what makes GLFW
 // declare glfwCreateWindowSurface and friends when GLFW is included afterwards.
 #include <volk.h>
 
 // VMA is told to fetch every Vulkan function it needs itself, dynamically, starting
-// from just vkGetInstanceProcAddr/vkGetDeviceProcAddr (which we hand it from volk when
-// the allocator is created). That means we never link VMA against the loader directly,
+// from just vkGetInstanceProcAddr/vkGetDeviceProcAddr (handed to it from volk when
+// the allocator is created). That means VMA is never linked against the loader directly,
 // matching how the rest of the backend talks to Vulkan through volk.
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
@@ -42,9 +42,8 @@ namespace TinyEngine {
 	// format everywhere sidesteps needing per-target pipeline variants.
 	// D32_SFLOAT isn't unconditionally guaranteed by the Vulkan spec the way
 	// the swapchain's colour format effectively is on this hardware, but
-	// every desktop GPU this engine has actually run on supports it, and
-	// this is a bring-up phase, not a broad hardware compatibility pass -
-	// worth revisiting with a real capability query if that ever changes.
+	// every desktop GPU this engine has run on supports it - worth
+	// revisiting with a real capability query if that ever changes.
 	constexpr VkFormat kSharedDepthFormat = VK_FORMAT_D32_SFLOAT;
 
 	// Turns a failed Vulkan call into an assertion instead of letting the backend limp

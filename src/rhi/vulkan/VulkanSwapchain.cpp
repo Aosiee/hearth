@@ -58,17 +58,16 @@ namespace TinyEngine {
 	VkSurfaceFormatKHR VulkanSwapchain::ChooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& available) const
 	{
 		// Deliberately UNORM, not SRGB, even though VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
-		// (the colour space, a separate thing from the format) is still what we
-		// want. An _SRGB *format* makes the GPU automatically apply a linear ->
+		// (the colour space, a separate thing from the format) is still what is
+		// wanted. An _SRGB *format* makes the GPU automatically apply a linear ->
 		// sRGB encode when the fragment shader writes to this attachment, which
 		// is only correct if the shader is actually working in linear colour
 		// (i.e. textures were sampled through an _SRGB format that decoded them
 		// first). VulkanTexture2D samples as plain UNORM (no decode, see its
 		// header), so the shader is really just passing already-sRGB-encoded
 		// bytes through unmodified — writing that through an _SRGB attachment
-		// double-encodes it, which reads as washed out, lower contrast colour
-		// (confirmed by an actual GL-vs-Vulkan screenshot comparison). GL never
-		// does any gamma correction anywhere in this renderer (no
+		// double-encodes it, which reads as washed out, lower contrast colour.
+		// GL never does any gamma correction anywhere in this renderer (no
 		// GL_FRAMEBUFFER_SRGB, no sRGB texture formats), so matching that
 		// "untouched bytes all the way through" pipeline means the swapchain
 		// shouldn't apply one either.
@@ -100,7 +99,7 @@ namespace TinyEngine {
 
 		for (VkPresentModeKHR mode : available)
 		{
-			// Mailbox gives us the lowest latency without tearing when it's there,
+			// Mailbox gives the lowest latency without tearing when it's there,
 			// but FIFO is the only mode the spec actually guarantees, so it's the
 			// safe fallback everywhere else.
 			if (mode == VK_PRESENT_MODE_MAILBOX_KHR)
@@ -410,8 +409,7 @@ namespace TinyEngine {
 
 		// If a previous frame in flight is still using this exact image (can
 		// happen once the swapchain has more images than frames in flight), wait
-		// for it before we start writing over resources it might still be
-		// reading from.
+		// for it before writing over resources it might still be reading from.
 		if (m_ImagesInFlight[outImageIndex] != VK_NULL_HANDLE)
 			vkWaitForFences(device, 1, &m_ImagesInFlight[outImageIndex], VK_TRUE, UINT64_MAX);
 

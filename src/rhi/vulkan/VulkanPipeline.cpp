@@ -92,8 +92,21 @@ namespace TinyEngine {
 			blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
 			blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
 			blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-			blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-			blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+			if (spec.PreserveDestinationAlpha)
+			{
+				// Leave the destination alpha untouched (outline composite):
+				// the colour still blends normally, but the alpha channel of
+				// the already-rendered opaque display target stays 1.0, so
+				// ImGui's own SRC_ALPHA blending of that texture doesn't show
+				// the window background through the non-outline pixels.
+				blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+				blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+			}
+			else
+			{
+				blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+				blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+			}
 			blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 		}
 
@@ -109,8 +122,8 @@ namespace TinyEngine {
 		dynamicState.pDynamicStates = dynamicStates;
 
 		// No VkRenderPass/VkFramebuffer, this pipeline is built against the
-		// dynamic rendering attachment formats directly (leaning on
-		// VK_KHR_dynamic_rendering being core in 1.3).
+		// dynamic rendering attachment formats directly (VK_KHR_dynamic_rendering
+		// is core in 1.3).
 		VkPipelineRenderingCreateInfo renderingCreateInfo{};
 		renderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
 		renderingCreateInfo.colorAttachmentCount = 1;

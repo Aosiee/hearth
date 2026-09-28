@@ -111,9 +111,9 @@ namespace TinyEngine {
 		// The current pool block is exhausted (its own fixed maxSets, set
 		// at CreatePoolBlock time) - grow by adding another same-sized
 		// block rather than failing outright or requiring a caller to
-		// somehow never exceed a fixed number. Every other VkResult still
-		// goes through VK_CHECK below and asserts, same as before - this
-		// only special-cases the two "pool's out of room" results.
+		// never exceed a fixed number. Every other VkResult still goes
+		// through VK_CHECK below and asserts - this only special-cases the
+		// two "pool's out of room" results.
 		if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL)
 		{
 			TE_CORE_INFO(LogVulkan, "VulkanDescriptorAllocator '{0}': pool block {1} exhausted, growing to block {2}.", m_DebugName, m_Pools.size() - 1, m_Pools.size());
