@@ -21,29 +21,35 @@ namespace TinyEngine {
 		CreateSyncObjects();
 	}
 
+	VulkanSwapchain::~VulkanSwapchain()
+	{
+		Shutdown();
+	}
+
 	void VulkanSwapchain::Shutdown()
 	{
 		TE_PROFILE_FUNCTION();
+
+		if (m_Device == nullptr)
+			return; // idempotent: the destructor runs this after an explicit Shutdown
 
 		VkDevice device = m_Device->GetDevice();
 		vkDeviceWaitIdle(device);
 
 		DestroySwapchainResources();
 
-		for (VkSemaphore semaphore : m_ImageAvailableSemaphores)
+		for (VkSemaphore& semaphore : m_ImageAvailableSemaphores)
 		{
 			if (semaphore != VK_NULL_HANDLE)
 				vkDestroySemaphore(device, semaphore, nullptr);
-		}
-
-		for (VkFence fence : m_InFlightFences)
-		{
-			if (fence != VK_NULL_HANDLE)
-				vkDestroyFence(device, fence, nullptr);
+			semaphore = VK_NULL_HANDLE;
 		}
 
 		if (m_Surface != VK_NULL_HANDLE)
 			vkDestroySurfaceKHR(m_Device->GetInstance(), m_Surface, nullptr);
+		m_Surface = VK_NULL_HANDLE;
+
+		m_Device = nullptr;
 	}
 
 	void VulkanSwapchain::CreateSurface(GLFWwindow* window)
@@ -298,7 +304,7 @@ namespace TinyEngine {
 		}
 
 		// Fresh set of images means none of them belong to an in-flight frame yet.
-		m_ImagesInFlight.assign(m_Images.size(), VK_NULL_HANDLE);
+		m_ImagesInFlight.assign(m_Images.size(), 0);
 
 		// Render finished semaphores are per image (see header comment), so they
 		// need to be (re)created whenever the image count changes.
@@ -325,19 +331,13 @@ namespace TinyEngine {
 		VkSemaphoreCreateInfo semaphoreCreateInfo{};
 		semaphoreCreateInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
-		VkFenceCreateInfo fenceCreateInfo{};
-		fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-		// Created already signalled so the very first AcquireNextImage's wait
-		// doesn't block forever waiting on a frame that never ran.
-		fenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
 		for (uint32_t i = 0; i < VulkanDevice::FramesInFlight; i++)
 		{
 			VK_CHECK(vkCreateSemaphore(m_Device->GetDevice(), &semaphoreCreateInfo, nullptr, &m_ImageAvailableSemaphores[i]));
-			VK_CHECK(vkCreateFence(m_Device->GetDevice(), &fenceCreateInfo, nullptr, &m_InFlightFences[i]));
-
 			m_Device->SetObjectName(VK_OBJECT_TYPE_SEMAPHORE, (uint64_t)m_ImageAvailableSemaphores[i], "Image Available Semaphore (frame " + std::to_string(i) + ")");
-			m_Device->SetObjectName(VK_OBJECT_TYPE_FENCE, (uint64_t)m_InFlightFences[i], "In Flight Fence (frame " + std::to_string(i) + ")");
+			// P-A2: no fences - the frame slot's first acquire waits on
+			// timeline value 0 (an immediate no-op).
+			m_FrameLastValues[i] = 0;
 		}
 	}
 
@@ -393,7 +393,10 @@ namespace TinyEngine {
 
 		VkDevice device = m_Device->GetDevice();
 
-		vkWaitForFences(device, 1, &m_InFlightFences[frameIndex], VK_TRUE, UINT64_MAX);
+		// P-A2: the frame slot's previous submission must have completed
+		// before its command pool/buffer is reused (the timeline replaces
+		// the old per-frame fence).
+		m_Device->WaitForTimelineValue(m_FrameLastValues[frameIndex]);
 
 		VkResult result = vkAcquireNextImageKHR(device, m_Swapchain, UINT64_MAX, m_ImageAvailableSemaphores[frameIndex], VK_NULL_HANDLE, &outImageIndex);
 
@@ -410,12 +413,8 @@ namespace TinyEngine {
 		// If a previous frame in flight is still using this exact image (can
 		// happen once the swapchain has more images than frames in flight), wait
 		// for it before writing over resources it might still be reading from.
-		if (m_ImagesInFlight[outImageIndex] != VK_NULL_HANDLE)
-			vkWaitForFences(device, 1, &m_ImagesInFlight[outImageIndex], VK_TRUE, UINT64_MAX);
-
-		m_ImagesInFlight[outImageIndex] = m_InFlightFences[frameIndex];
-
-		vkResetFences(device, 1, &m_InFlightFences[frameIndex]);
+		if (m_ImagesInFlight[outImageIndex] != 0)
+			m_Device->WaitForTimelineValue(m_ImagesInFlight[outImageIndex]);
 
 		return true;
 	}
@@ -428,17 +427,38 @@ namespace TinyEngine {
 		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
 		VkSemaphore signalSemaphores[] = { m_RenderFinishedSemaphores[imageIndex] };
 
+		// P-A2: the submission also signals the graphics-queue timeline at a
+		// fresh value; that value is what paces this frame slot's reuse and
+		// the image's in-flight tracking (the fences are gone).
+		uint64_t timelineValue = m_Device->AllocateTimelineValue();
+
+		// One signal value per signalled semaphore; the binary render-finished
+		// entry is ignored (binary semaphores have no value), the timeline one
+		// carries the fresh value (VUID-VkSubmitInfo-pNext-03241).
+		uint64_t signalValues[] = { 0, timelineValue };
+
+		VkTimelineSemaphoreSubmitInfo timelineSubmit{};
+		timelineSubmit.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+		timelineSubmit.signalSemaphoreValueCount = 2;
+		timelineSubmit.pSignalSemaphoreValues = signalValues;
+		VkSemaphore timelineSemaphore = m_Device->GetTimelineSemaphore();
+
 		VkSubmitInfo submitInfo{};
 		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.pNext = &timelineSubmit;
 		submitInfo.waitSemaphoreCount = 1;
 		submitInfo.pWaitSemaphores = waitSemaphores;
 		submitInfo.pWaitDstStageMask = waitStages;
 		submitInfo.commandBufferCount = 1;
 		submitInfo.pCommandBuffers = &commandBuffer;
-		submitInfo.signalSemaphoreCount = 1;
-		submitInfo.pSignalSemaphores = signalSemaphores;
+		submitInfo.signalSemaphoreCount = 2;
+		VkSemaphore bothSignals[] = { signalSemaphores[0], timelineSemaphore };
+		submitInfo.pSignalSemaphores = bothSignals;
 
-		VK_CHECK(vkQueueSubmit(m_Device->GetGraphicsQueue(), 1, &submitInfo, m_InFlightFences[frameIndex]));
+		VK_CHECK(vkQueueSubmit(m_Device->GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
+
+		m_ImagesInFlight[imageIndex] = timelineValue;
+		m_FrameLastValues[frameIndex] = timelineValue;
 
 		VkPresentInfoKHR presentInfo{};
 		presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;

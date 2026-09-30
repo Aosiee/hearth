@@ -2,6 +2,8 @@
 
 #include "Platform/Vulkan/VulkanCommon.h"
 
+#include <atomic>
+
 struct GLFWwindow;
 
 namespace TinyEngine {
@@ -33,6 +35,10 @@ namespace TinyEngine {
 		static constexpr uint32_t MaxWindowSlots = 4;
 		static constexpr uint32_t TotalFrameSlots = FramesInFlight * MaxWindowSlots;
 
+		// The per-(frame, thread) command-pool table's thread count.
+		// Hardware concurrency, capped at 16, fixed at Init.
+		static constexpr uint32_t MaxRecordThreads = 16;
+
 		// Reserves the next window slot and returns its base frame index
 		// (slotIndex * FramesInFlight). Must be called between frames (a
 		// window's VulkanContext::Init), never while another window's
@@ -52,11 +58,27 @@ namespace TinyEngine {
 		uint32_t GetGraphicsQueueFamily() const { return m_GraphicsQueueFamily; }
 		VmaAllocator GetAllocator() const { return m_Allocator; }
 
-		VkCommandPool GetCommandPool(uint32_t frameIndex) const
+		// The command pools are keyed by (frame slot, record thread); no
+		// pool belongs to a window slot, so adding recording threads moves
+		// no pools.
+		VkCommandPool GetCommandPool(uint32_t frameIndex, uint32_t threadIndex = 0) const
 		{
-			TE_CORE_ASSERT(frameIndex < m_CommandPools.size() && m_CommandPools[frameIndex] != VK_NULL_HANDLE, "Command pool index out of range!");
-			return m_CommandPools[frameIndex];
+			uint32_t poolIndex = frameIndex * m_RecordThreadCount + threadIndex;
+			TE_CORE_ASSERT(poolIndex < m_CommandPools.size() && m_CommandPools[poolIndex] != VK_NULL_HANDLE, "Command pool index out of range!");
+			return m_CommandPools[poolIndex];
 		}
+
+		// ---- P-A2: the graphics-queue timeline -----------------------------
+		// One timeline semaphore replaces the per-frame fences for pacing and
+		// in-flight tracking; binary semaphores remain ONLY for swapchain
+		// acquire/present. Every submission signals the timeline at a fresh
+		// value; waiters block until the GPU passes it.
+		uint64_t AllocateTimelineValue();          // the next value a submission will signal
+		void AdvanceTimelineValue(uint64_t value); // callers signalling an explicit value keep the allocator monotonic
+		uint64_t GetLastSubmittedValue() const { return m_TimelineValue.load(); }
+		VkSemaphore GetTimelineSemaphore() const { return m_TimelineSemaphore; }
+		void WaitForTimelineValue(uint64_t value); // blocks the CALLING thread
+		uint64_t GetCompletedTimelineValue();      // the value the GPU has actually reached
 
 		bool IsValidationEnabled() const { return m_ValidationEnabled; }
 
@@ -99,6 +121,14 @@ namespace TinyEngine {
 		// would lose them.
 		void CmdResetTimestampPool(VkCommandBuffer commandBuffer, uint32_t frameIndex);
 
+		// The frame-indexed timestamp pool (the RHI's WriteTimestamp
+		// routes through this; the P-A2 frame-sync rework re-keys it).
+		VkQueryPool GetTimestampPool(uint32_t frameIndex) const
+		{
+			TE_CORE_ASSERT(frameIndex < m_TimestampPools.size() && m_TimestampPools[frameIndex] != VK_NULL_HANDLE, "Timestamp pool index out of range!");
+			return m_TimestampPools[frameIndex];
+		}
+
 		// Not tied to the command buffer at all (this is host-side
 		// bookkeeping only), used to populate the GPU frame debugger's
 		// barrier list. Only called at the handful of always-present,
@@ -127,6 +157,7 @@ namespace TinyEngine {
 		void CreateAllocator();
 		void CreateCommandPools();
 		void CreateTimestampQueryPools();
+		void CreateTimelineSemaphore();
 
 		bool CheckValidationLayerSupport() const;
 
@@ -143,7 +174,12 @@ namespace TinyEngine {
 		VmaAllocator m_Allocator = VK_NULL_HANDLE;
 
 		std::vector<VkCommandPool> m_CommandPools;
+		uint32_t m_RecordThreadCount = 1;
 		VkCommandPool m_TransientCommandPool = VK_NULL_HANDLE;
+
+		// P-A2: the graphics-queue timeline (see the accessors above).
+		VkSemaphore m_TimelineSemaphore = VK_NULL_HANDLE;
+		std::atomic<uint64_t> m_TimelineValue{ 0 };
 
 		uint32_t m_NextWindowSlot = 0;
 

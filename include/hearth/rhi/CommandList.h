@@ -1,0 +1,69 @@
+#pragma once
+
+// The command-list surface. Recordable from any thread in contract; today
+// it records on the main thread only (recording threads come later). A
+// CommandList is bound to the thread whose pool it came from - recording
+// from another thread is a dev assert.
+
+#include "TinyEngine/RHI/Types.h"
+#include "TinyEngine/RHI/States.h"
+#include "TinyEngine/RHI/Format.h"
+#include "TinyEngine/RHI/BarrierDesc.h"
+
+#include <cstdint>
+#include <span>
+
+namespace TinyEngine {
+namespace rhi {
+
+	// One dynamic-rendering attachment set (the backend uses dynamic
+	// rendering, so there are no VkFramebuffer objects).
+	// The render area comes from the colour attachment's size.
+	struct AttachmentDesc
+	{
+		TextureHandle Color;               // invalid = no colour attachment
+		TextureHandle Depth;               // invalid = no depth attachment
+		bool   DepthReadOnly = false;
+		bool   LoadColor = true;           // true = clear (the clear value comes from the Device)
+		bool   LoadDepth = true;
+	};
+
+	class CommandList
+	{
+	public:
+		virtual ~CommandList() = default;
+
+		virtual void Begin() = 0;
+		virtual void End() = 0;
+
+		virtual void BeginRendering(std::span<const AttachmentDesc> attachments) = 0;
+		virtual void EndRendering() = 0;
+
+		virtual void Barrier(std::span<const BarrierDesc> barriers) = 0;
+
+		virtual void BindPipeline(PipelineHandle pipeline) = 0;
+		virtual void PushConstants(uint32_t stages, uint32_t offset, const void* data, uint32_t size) = 0;
+		virtual void BindVertexBuffer(BufferHandle buffer, uint64_t offset = 0) = 0;
+		virtual void BindIndexBuffer(BufferHandle buffer, uint64_t offset = 0) = 0;
+
+		virtual void Draw(uint32_t vertexCount, uint32_t instanceCount = 1,
+			uint32_t firstVertex = 0, uint32_t firstInstance = 0) = 0;
+		virtual void DrawIndexed(uint32_t indexCount, uint32_t instanceCount = 1,
+			uint32_t firstIndex = 0, int32_t vertexOffset = 0, uint32_t firstInstance = 0) = 0;
+
+		virtual void Dispatch(uint32_t groupX, uint32_t groupY, uint32_t groupZ) = 0; // plumbed; no consumer yet
+
+		virtual void CopyBufferToBuffer(BufferHandle src, BufferHandle dst,
+			uint64_t srcOffset, uint64_t dstOffset, uint64_t size) = 0;
+		virtual void CopyBufferToTexture(BufferHandle src, TextureHandle dst,
+			uint32_t width, uint32_t height) = 0;
+		virtual void CopyTextureToBuffer(TextureHandle src, BufferHandle dst,
+			uint32_t width, uint32_t height) = 0;
+
+		virtual void BeginLabel(const char* name) = 0;
+		virtual void EndLabel() = 0;
+		virtual void WriteTimestamp(uint32_t queryIndex) = 0;
+	};
+
+} // namespace rhi
+} // namespace TinyEngine

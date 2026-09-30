@@ -5,7 +5,9 @@
 #include "TinyEngine/Debug/Profiler.h"
 
 #include <GLFW/glfw3.h>
+#include <algorithm>
 #include <cstring>
+#include <thread>
 
 namespace TinyEngine {
 
@@ -90,6 +92,57 @@ namespace TinyEngine {
 		CreateAllocator();
 		CreateCommandPools();
 		CreateTimestampQueryPools();
+		CreateTimelineSemaphore();
+	}
+
+	void VulkanDevice::CreateTimelineSemaphore()
+	{
+		VkSemaphoreTypeCreateInfo timelineInfo{};
+		timelineInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+		timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+		timelineInfo.initialValue = 0;
+
+		VkSemaphoreCreateInfo createInfo{};
+		createInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+		createInfo.pNext = &timelineInfo;
+
+		VK_CHECK(vkCreateSemaphore(m_Device, &createInfo, nullptr, &m_TimelineSemaphore));
+		SetObjectName(VK_OBJECT_TYPE_SEMAPHORE, (uint64_t)m_TimelineSemaphore, "Graphics Queue Timeline");
+		m_TimelineValue = 0;
+	}
+
+	uint64_t VulkanDevice::AllocateTimelineValue()
+	{
+		return m_TimelineValue.fetch_add(1, std::memory_order_relaxed) + 1;
+	}
+
+	void VulkanDevice::AdvanceTimelineValue(uint64_t value)
+	{
+		// A caller submitting an explicit signal value must not let a later
+		// AllocateTimelineValue hand back a value <= one already signalled.
+		uint64_t current = m_TimelineValue.load(std::memory_order_relaxed);
+		while (current < value && !m_TimelineValue.compare_exchange_weak(current, value, std::memory_order_relaxed))
+			;
+	}
+
+	void VulkanDevice::WaitForTimelineValue(uint64_t value)
+	{
+		if (value == 0)
+			return; // the timeline starts at 0 - nothing submitted yet
+		VkSemaphoreWaitInfo waitInfo{};
+		waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+		waitInfo.semaphoreCount = 1;
+		waitInfo.pSemaphores = &m_TimelineSemaphore;
+		waitInfo.pValues = &value;
+		VK_CHECK(vkWaitSemaphores(m_Device, &waitInfo, UINT64_MAX));
+	}
+
+	uint64_t VulkanDevice::GetCompletedTimelineValue()
+	{
+		uint64_t value = 0;
+		if (m_TimelineSemaphore != VK_NULL_HANDLE)
+			vkGetSemaphoreCounterValue(m_Device, m_TimelineSemaphore, &value);
+		return value;
 	}
 
 	void VulkanDevice::Shutdown()
@@ -113,6 +166,9 @@ namespace TinyEngine {
 
 		if (m_TransientCommandPool != VK_NULL_HANDLE)
 			vkDestroyCommandPool(m_Device, m_TransientCommandPool, nullptr);
+
+		if (m_TimelineSemaphore != VK_NULL_HANDLE)
+			vkDestroySemaphore(m_Device, m_TimelineSemaphore, nullptr);
 
 		if (m_Allocator != VK_NULL_HANDLE)
 			vmaDestroyAllocator(m_Allocator);
@@ -383,19 +439,29 @@ namespace TinyEngine {
 
 	void VulkanDevice::CreateCommandPools()
 	{
-		m_CommandPools.resize(TotalFrameSlots, VK_NULL_HANDLE);
+		// Pools are keyed by (frame slot, record thread). v1 records on
+		// thread 0; the thread count is fixed at Init (more recording
+		// threads can be added without moving pools again).
+		m_RecordThreadCount = std::min(MaxRecordThreads,
+			std::max(1u, std::thread::hardware_concurrency() == 0 ? 1u : (uint32_t)std::thread::hardware_concurrency()));
+		m_CommandPools.resize(TotalFrameSlots * m_RecordThreadCount, VK_NULL_HANDLE);
 
 		VkCommandPoolCreateInfo poolCreateInfo{};
 		poolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
 		// Individually resettable so each frame's pool can be reset in one call once
-		// that frame's fence has signalled, rather than freeing/reallocating buffers.
+		// that frame's timeline value has passed, rather than freeing/reallocating buffers.
 		poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 		poolCreateInfo.queueFamilyIndex = m_GraphicsQueueFamily;
 
-		for (uint32_t i = 0; i < TotalFrameSlots; i++)
+		for (uint32_t frame = 0; frame < TotalFrameSlots; frame++)
 		{
-			VK_CHECK(vkCreateCommandPool(m_Device, &poolCreateInfo, nullptr, &m_CommandPools[i]));
-			SetObjectName(VK_OBJECT_TYPE_COMMAND_POOL, (uint64_t)m_CommandPools[i], "Frame Slot Command Pool " + std::to_string(i));
+			for (uint32_t thread = 0; thread < m_RecordThreadCount; thread++)
+			{
+				VK_CHECK(vkCreateCommandPool(m_Device, &poolCreateInfo, nullptr, &m_CommandPools[frame * m_RecordThreadCount + thread]));
+				SetObjectName(VK_OBJECT_TYPE_COMMAND_POOL,
+					(uint64_t)m_CommandPools[frame * m_RecordThreadCount + thread],
+					"Command Pool (frame " + std::to_string(frame) + ", thread " + std::to_string(thread) + ")");
+			}
 		}
 
 		VkCommandPoolCreateInfo transientPoolCreateInfo{};

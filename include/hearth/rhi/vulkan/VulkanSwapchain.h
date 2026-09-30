@@ -17,6 +17,10 @@ namespace TinyEngine {
 	public:
 		void Init(VulkanDevice& device, GLFWwindow* window);
 		void Shutdown();
+		// Self-cleaning: the RHI owns swapchains in a handle table whose
+		// clear path destroys objects directly, so the destructor must
+		// release the Vulkan objects (Shutdown is idempotent).
+		~VulkanSwapchain();
 
 		// Called when the window resizes. Cheap to call even if the size hasn't
 		// actually changed, callers don't need to track that themselves.
@@ -103,15 +107,18 @@ namespace TinyEngine {
 		// semaphore being waited on twice before it was ever signalled again.
 		std::vector<VkSemaphore> m_RenderFinishedSemaphores;
 
-		// These two are per frame in flight, not per image, they guard the CPU
-		// side reuse of that frame's command pool/buffer.
+		// The image-available binary semaphore is per frame in flight (the
+		// acquire/present handshake). The CPU-side reuse of a frame's command
+		// pool/buffer is paced by the device's graphics-queue timeline: each
+		// frame's last submit value (0 = never submitted) is waited on before
+		// reusing the slot (P-A2 - the fences are gone).
 		VkSemaphore m_ImageAvailableSemaphores[VulkanDevice::FramesInFlight] = {};
-		VkFence m_InFlightFences[VulkanDevice::FramesInFlight] = {};
+		uint64_t m_FrameLastValues[VulkanDevice::FramesInFlight] = {};
 
-		// Tracks which frame's fence last used a given swapchain image, so that if
-		// acquire ever hands back an image that a different frame in flight is
-		// still using, the wait is on that fence first instead of racing it.
-		std::vector<VkFence> m_ImagesInFlight;
+		// Tracks which frame's submit value last used a given swapchain image,
+		// so an acquire that hands back a still-in-use image waits on that
+		// value first instead of racing it (0 = never used).
+		std::vector<uint64_t> m_ImagesInFlight;
 	};
 
 }
