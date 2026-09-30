@@ -203,8 +203,10 @@ namespace TinyEngine {
 
 		bool m_TimestampsSupported = false;
 		float m_TimestampPeriodNs = 1.0f;
+		uint32_t m_MaxPushConstantsSize = 128;
 	public:
 		float GetTimestampPeriodNs() const { return m_TimestampPeriodNs; }
+		uint32_t GetMaxPushConstantsSize() const { return m_MaxPushConstantsSize; }
 	private:
 
 		std::vector<VkQueryPool> m_TimestampPools;

@@ -21,16 +21,35 @@ namespace rhi {
 			return VK_SHADER_STAGE_VERTEX_BIT;
 		}
 
+		VkCompareOp ToVkCompareOp(CompareOp op)
+		{
+			switch (op)
+			{
+			case CompareOp::Never:          return VK_COMPARE_OP_NEVER;
+			case CompareOp::Less:           return VK_COMPARE_OP_LESS;
+			case CompareOp::LessOrEqual:    return VK_COMPARE_OP_LESS_OR_EQUAL;
+			case CompareOp::Equal:          return VK_COMPARE_OP_EQUAL;
+			case CompareOp::GreaterOrEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+			case CompareOp::Greater:        return VK_COMPARE_OP_GREATER;
+			case CompareOp::Always:         return VK_COMPARE_OP_ALWAYS;
+			}
+			return VK_COMPARE_OP_LESS;
+		}
+
 		VkFormat ToVkFormat(Format format)
 		{
 			switch (format)
 			{
-			case Format::B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
-			case Format::B8G8R8A8_SRGB:  return VK_FORMAT_B8G8R8A8_SRGB;
-			case Format::R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
-			case Format::R8_UNORM:       return VK_FORMAT_R8_UNORM;
-			case Format::D32_SFLOAT:     return VK_FORMAT_D32_SFLOAT;
-			case Format::Undefined:      return VK_FORMAT_UNDEFINED;
+			case Format::B8G8R8A8_UNORM:     return VK_FORMAT_B8G8R8A8_UNORM;
+			case Format::B8G8R8A8_SRGB:      return VK_FORMAT_B8G8R8A8_SRGB;
+			case Format::R8G8B8A8_UNORM:     return VK_FORMAT_R8G8B8A8_UNORM;
+			case Format::R8_UNORM:           return VK_FORMAT_R8_UNORM;
+			case Format::D32_SFLOAT:         return VK_FORMAT_D32_SFLOAT;
+			case Format::R32G32B32_SFLOAT:   return VK_FORMAT_R32G32B32_SFLOAT;
+			case Format::R32G32B32A32_SFLOAT: return VK_FORMAT_R32G32B32A32_SFLOAT;
+			case Format::R32G32_SFLOAT:      return VK_FORMAT_R32G32_SFLOAT;
+			case Format::R32_SFLOAT:         return VK_FORMAT_R32_SFLOAT;
+			case Format::Undefined:          return VK_FORMAT_UNDEFINED;
 			}
 			return VK_FORMAT_UNDEFINED;
 		}
@@ -288,6 +307,35 @@ namespace rhi {
 		vkCmdBindPipeline(m_CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_Device->GetPipelineHandle(pipeline));
 	}
 
+	void VulkanCommandList::BindGlobalSet()
+	{
+		// The global bindless set at set 0; the layout comes from the bound
+		// pipeline's layout, so BindPipeline must have run first.
+		TE_CORE_ASSERT(m_BoundLayout != VK_NULL_HANDLE, "BindGlobalSet called before BindPipeline");
+		VkDescriptorSet set = m_Device->GetGlobalDescriptorSet();
+		vkCmdBindDescriptorSets(m_CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_BoundLayout, 0, 1, &set, 0, nullptr);
+	}
+
+	void VulkanCommandList::SetViewport(float x, float y, float width, float height, float minDepth, float maxDepth)
+	{
+		VkViewport viewport{};
+		viewport.x = x;
+		viewport.y = y;
+		viewport.width = width;
+		viewport.height = height;
+		viewport.minDepth = minDepth;
+		viewport.maxDepth = maxDepth;
+		vkCmdSetViewport(m_CommandBuffer, 0, 1, &viewport);
+	}
+
+	void VulkanCommandList::SetScissor(int32_t x, int32_t y, uint32_t width, uint32_t height)
+	{
+		VkRect2D scissor{};
+		scissor.offset = { x, y };
+		scissor.extent = { width, height };
+		vkCmdSetScissor(m_CommandBuffer, 0, 1, &scissor);
+	}
+
 	void VulkanCommandList::PushConstants(uint32_t stages, uint32_t offset, const void* data, uint32_t size)
 	{
 		vkCmdPushConstants(m_CommandBuffer, m_BoundLayout, (VkShaderStageFlags)stages, offset, size, data);
@@ -393,12 +441,87 @@ namespace rhi {
 		m_Initialized = true;
 		m_GraphicsQueue.Index = 0;
 		m_GraphicsQueue.Generation = 0;
+		CreateGlobalBindlessSet();
+		CreateFixedSamplers();
+	}
+
+	// The two fixed samplers Wisp picks from. Baked with Wisp's EXACT
+	// parameters - single-level filtering: the nearest sampler serves the
+	// font atlas, the linear one the image widgets; both CLAMP and clamp
+	// maxLod to 0 so a (conceptually) single-level image can never pick a
+	// downsampled level.
+	void VulkanRhiDevice::CreateFixedSamplers()
+	{
+		{
+			VkSamplerCreateInfo info{};
+			info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+			info.magFilter = VK_FILTER_LINEAR;
+			info.minFilter = VK_FILTER_LINEAR;
+			info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+			info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			info.minLod = 0.0f;
+			info.maxLod = 0.0f;
+			VulkanCheckResult(vkCreateSampler(m_Vulkan.GetDevice(), &info, nullptr, &m_FixedSamplerLinear),
+				"vkCreateSampler", __FILE__, __LINE__);
+			m_Vulkan.SetObjectName(VK_OBJECT_TYPE_SAMPLER, (uint64_t)m_FixedSamplerLinear, "Fixed Sampler (linear, clamp)");
+		}
+		{
+			VkSamplerCreateInfo info{};
+			info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+			info.magFilter = VK_FILTER_NEAREST;
+			info.minFilter = VK_FILTER_NEAREST;
+			info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+			info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			info.minLod = 0.0f;
+			info.maxLod = 0.0f;
+			VulkanCheckResult(vkCreateSampler(m_Vulkan.GetDevice(), &info, nullptr, &m_FixedSamplerNearest),
+				"vkCreateSampler", __FILE__, __LINE__);
+			m_Vulkan.SetObjectName(VK_OBJECT_TYPE_SAMPLER, (uint64_t)m_FixedSamplerNearest, "Fixed Sampler (nearest, clamp)");
+		}
 	}
 
 	void VulkanRhiDevice::ShutdownDevice()
 	{
 		if (!m_Initialized)
 			return;
+
+		// With no submits left the timeline never advances again: idle the
+		// device, drain everything queued so far, queue every still-live
+		// non-texture resource (the wrappers have no freeing destructors -
+		// only VulkanTexture2D/VulkanSwapchain release themselves through
+		// Clear), clear the handle tables, drain again, then hand the (now
+		// clean) device over to VulkanDevice::Shutdown.
+		vkDeviceWaitIdle(m_Vulkan.GetDevice());
+		DrainRetireQueueUnconditional();
+		for (const auto& slot : m_Pipelines.Slots)
+		{
+			if (slot.Alive && slot.Object)
+				QueuePipelineForDestruction(slot.Object->GetHandle(), slot.Object->GetLayout());
+		}
+		for (const auto& slot : m_Shaders.Slots)
+		{
+			if (slot.Alive && slot.Object)
+				QueueShaderForDestruction(slot.Object->GetHandle());
+		}
+		for (const auto& slot : m_Samplers.Slots)
+		{
+			if (slot.Alive && slot.Object)
+				QueueSamplerForDestruction(slot.Object->GetHandle());
+		}
+		for (const auto& slot : m_Buffers.Slots)
+		{
+			if (slot.Alive && slot.Object && !slot.Object->IsExternal())
+				QueueBufferForDestruction(slot.Object->GetHandle(), slot.Object->GetAllocation());
+		}
+		for (const auto& slot : m_Textures.Slots)
+		{
+			if (slot.Alive && slot.Object && slot.Object->IsWrapped())
+				QueueTextureForDestruction(VK_NULL_HANDLE, VK_NULL_HANDLE, slot.Object->Wrapped->GetView(), VK_NULL_HANDLE, slot.Object->Wrapped->GetBindlessIndex());
+		}
 		m_Swapchains.Clear();
 		m_CommandLists.Clear();
 		m_Pipelines.Clear();
@@ -406,8 +529,281 @@ namespace rhi {
 		m_Samplers.Clear();
 		m_Textures.Clear();
 		m_Buffers.Clear();
+		DrainRetireQueueUnconditional();
+		DestroyGlobalBindlessSet();
+		// The fixed samplers are device-owned (never in a retire entry).
+		if (m_FixedSamplerLinear != VK_NULL_HANDLE)
+			vkDestroySampler(m_Vulkan.GetDevice(), m_FixedSamplerLinear, nullptr);
+		if (m_FixedSamplerNearest != VK_NULL_HANDLE)
+			vkDestroySampler(m_Vulkan.GetDevice(), m_FixedSamplerNearest, nullptr);
+		m_FixedSamplerLinear = VK_NULL_HANDLE;
+		m_FixedSamplerNearest = VK_NULL_HANDLE;
 		m_Vulkan.Shutdown();
 		m_Initialized = false;
+	}
+
+	// ---- P-A3: the global bindless set + the retire queue -----------------------
+
+	void VulkanRhiDevice::CreateGlobalBindlessSet()
+	{
+		VkPhysicalDeviceDescriptorIndexingProperties indexingProperties{};
+		indexingProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES;
+		VkPhysicalDeviceProperties2 properties2{};
+		properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+		properties2.pNext = &indexingProperties;
+		vkGetPhysicalDeviceProperties2(m_Vulkan.GetPhysicalDevice(), &properties2);
+
+		TE_CORE_ASSERT(indexingProperties.maxDescriptorSetUpdateAfterBindSampledImages >= kBindlessTextures,
+			"the device's update-after-bind sampled-image capacity is below the bindless texture array");
+		TE_CORE_ASSERT(indexingProperties.maxPerStageDescriptorUpdateAfterBindSampledImages >= kBindlessTextures,
+			"the device's per-stage update-after-bind sampled-image capacity is below the bindless texture array");
+		TE_CORE_ASSERT(indexingProperties.maxDescriptorSetUpdateAfterBindStorageBuffers >= kBindlessBuffers,
+			"the device's update-after-bind storage-buffer capacity is below the bindless buffer array");
+		TE_CORE_ASSERT(indexingProperties.maxPerStageDescriptorUpdateAfterBindStorageBuffers >= kBindlessBuffers,
+			"the device's per-stage update-after-bind storage-buffer capacity is below the bindless buffer array");
+
+		// PARTIALLY_BOUND | UPDATE_AFTER_BIND; deliberately no
+		// VARIABLE_DESCRIPTOR_COUNT (one binding per set, and the full
+		// capacity is allocated anyway - runtimeDescriptorArray sizes the
+		// shader's [] from descriptorCount). ALL_GRAPHICS: no compute
+		// pipelines exist yet.
+		VkDescriptorBindingFlags flags[] = {
+			VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+			VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+		};
+		VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
+		flagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+		flagsInfo.bindingCount = 2;
+		flagsInfo.pBindingFlags = flags;
+
+		VkDescriptorSetLayoutBinding bindings[2] = {};
+		bindings[0].binding = 0;
+		bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		bindings[0].descriptorCount = kBindlessTextures;
+		bindings[0].stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+		bindings[1].binding = 1;
+		bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		bindings[1].descriptorCount = kBindlessBuffers;
+		bindings[1].stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+
+		VkDescriptorSetLayoutCreateInfo layoutInfo{};
+		layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		layoutInfo.pNext = &flagsInfo;
+		// The layout too must carry the update-after-bind flag for the
+		// UPDATE_AFTER_BIND binding flags to be legal
+		// (VUID-VkDescriptorSetLayoutCreateInfo-flags-03000).
+		layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+		layoutInfo.bindingCount = 2;
+		layoutInfo.pBindings = bindings;
+
+		VulkanCheckResult(vkCreateDescriptorSetLayout(m_Vulkan.GetDevice(), &layoutInfo, nullptr, &m_GlobalSetLayout),
+			"vkCreateDescriptorSetLayout", __FILE__, __LINE__);
+		m_Vulkan.SetObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, (uint64_t)m_GlobalSetLayout, "Global Bindless Set Layout");
+
+		VkDescriptorPoolSize poolSizes[2] = {
+			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kBindlessTextures },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kBindlessBuffers },
+		};
+		VkDescriptorPoolCreateInfo poolInfo{};
+		poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+		poolInfo.maxSets = 1;
+		poolInfo.poolSizeCount = 2;
+		poolInfo.pPoolSizes = poolSizes;
+
+		VulkanCheckResult(vkCreateDescriptorPool(m_Vulkan.GetDevice(), &poolInfo, nullptr, &m_GlobalSetPool),
+			"vkCreateDescriptorPool", __FILE__, __LINE__);
+		m_Vulkan.SetObjectName(VK_OBJECT_TYPE_DESCRIPTOR_POOL, (uint64_t)m_GlobalSetPool, "Global Bindless Set Pool");
+
+		VkDescriptorSetAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		allocInfo.descriptorPool = m_GlobalSetPool;
+		allocInfo.descriptorSetCount = 1;
+		allocInfo.pSetLayouts = &m_GlobalSetLayout;
+
+		VulkanCheckResult(vkAllocateDescriptorSets(m_Vulkan.GetDevice(), &allocInfo, &m_GlobalSet),
+			"vkAllocateDescriptorSets", __FILE__, __LINE__);
+		m_Vulkan.SetObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET, (uint64_t)m_GlobalSet, "Global Bindless Set");
+	}
+
+	void VulkanRhiDevice::DestroyGlobalBindlessSet()
+	{
+		// The set itself is freed with the pool (no FREE_DESCRIPTOR_SET flag).
+		if (m_GlobalSetPool != VK_NULL_HANDLE)
+			vkDestroyDescriptorPool(m_Vulkan.GetDevice(), m_GlobalSetPool, nullptr);
+		if (m_GlobalSetLayout != VK_NULL_HANDLE)
+			vkDestroyDescriptorSetLayout(m_Vulkan.GetDevice(), m_GlobalSetLayout, nullptr);
+		m_GlobalSet = VK_NULL_HANDLE;
+		m_GlobalSetPool = VK_NULL_HANDLE;
+		m_GlobalSetLayout = VK_NULL_HANDLE;
+	}
+
+	uint32_t VulkanRhiDevice::AllocateBindlessTextureIndex()
+	{
+		uint32_t index;
+		if (!m_FreeBindlessIndices.empty())
+		{
+			index = m_FreeBindlessIndices.back();
+			m_FreeBindlessIndices.pop_back();
+		}
+		else
+		{
+			TE_CORE_ASSERT(m_NextBindlessIndex < kBindlessTextures, "bindless texture array exhausted");
+			index = m_NextBindlessIndex++;
+		}
+		return index;
+	}
+
+	void VulkanRhiDevice::WriteTextureDescriptor(uint32_t index, VkImageView imageView, VkSampler sampler, VkImageLayout layout)
+	{
+		VkDescriptorImageInfo imageInfo{};
+		imageInfo.imageLayout = layout;
+		imageInfo.imageView = imageView;
+		imageInfo.sampler = sampler;
+
+		VkWriteDescriptorSet write{};
+		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		write.dstSet = m_GlobalSet;
+		write.dstBinding = 0;
+		write.dstArrayElement = index;
+		write.descriptorCount = 1;
+		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		write.pImageInfo = &imageInfo;
+
+		vkUpdateDescriptorSets(m_Vulkan.GetDevice(), 1, &write, 0, nullptr);
+	}
+
+	void VulkanRhiDevice::QueueTextureForDestruction(VkImage image, VmaAllocation allocation,
+		VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex)
+	{
+		RetireEntry entry;
+		entry.Kind_ = RetireEntry::Kind::Texture;
+		entry.Image = image;
+		entry.Allocation = allocation;
+		entry.ImageView = imageView;
+		entry.Sampler = sampler;
+		entry.BindlessIndex = bindlessIndex;
+		entry.HasBindlessIndex = true;
+		QueueRetire(std::move(entry));
+	}
+
+	void VulkanRhiDevice::QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation)
+	{
+		RetireEntry entry;
+		entry.Kind_ = RetireEntry::Kind::Buffer;
+		entry.Buffer = buffer;
+		entry.Allocation = allocation;
+		QueueRetire(std::move(entry));
+	}
+
+	void VulkanRhiDevice::QueuePipelineForDestruction(VkPipeline pipeline, VkPipelineLayout layout)
+	{
+		RetireEntry entry;
+		entry.Kind_ = RetireEntry::Kind::Pipeline;
+		entry.Pipeline = pipeline;
+		entry.Layout = layout;
+		QueueRetire(std::move(entry));
+	}
+
+	void VulkanRhiDevice::QueueShaderForDestruction(VkShaderModule shader)
+	{
+		RetireEntry entry;
+		entry.Kind_ = RetireEntry::Kind::Shader;
+		entry.ShaderModule = shader;
+		QueueRetire(std::move(entry));
+	}
+
+	void VulkanRhiDevice::QueueSamplerForDestruction(VkSampler sampler)
+	{
+		RetireEntry entry;
+		entry.Kind_ = RetireEntry::Kind::Sampler;
+		entry.Sampler = sampler;
+		QueueRetire(std::move(entry));
+	}
+
+	void VulkanRhiDevice::QueueRetire(RetireEntry&& entry)
+	{
+		// The stamp is the value the NEXT submit will signal - the earliest
+		// submission that could reference this object. Stamping with the
+		// last-submitted value frees one frame too early.
+		entry.Stamp = m_Vulkan.GetLastSubmittedValue() + 1;
+		m_RetireQueue.push_back(std::move(entry));
+	}
+
+	void VulkanRhiDevice::FreeRetireEntry(const RetireEntry& entry)
+	{
+		switch (entry.Kind_)
+		{
+		case RetireEntry::Kind::Texture:
+			if (entry.Sampler != VK_NULL_HANDLE)
+				vkDestroySampler(m_Vulkan.GetDevice(), entry.Sampler, nullptr);
+			if (entry.ImageView != VK_NULL_HANDLE)
+				vkDestroyImageView(m_Vulkan.GetDevice(), entry.ImageView, nullptr);
+			if (entry.Image != VK_NULL_HANDLE)
+				vmaDestroyImage(m_Vulkan.GetAllocator(), entry.Image, entry.Allocation);
+			break;
+		case RetireEntry::Kind::Buffer:
+			if (entry.Buffer != VK_NULL_HANDLE)
+				vmaDestroyBuffer(m_Vulkan.GetAllocator(), entry.Buffer, entry.Allocation);
+			break;
+		case RetireEntry::Kind::Pipeline:
+			if (entry.Pipeline != VK_NULL_HANDLE)
+				vkDestroyPipeline(m_Vulkan.GetDevice(), entry.Pipeline, nullptr);
+			if (entry.Layout != VK_NULL_HANDLE)
+				vkDestroyPipelineLayout(m_Vulkan.GetDevice(), entry.Layout, nullptr);
+			break;
+		case RetireEntry::Kind::Shader:
+			if (entry.ShaderModule != VK_NULL_HANDLE)
+				vkDestroyShaderModule(m_Vulkan.GetDevice(), entry.ShaderModule, nullptr);
+			break;
+		case RetireEntry::Kind::Sampler:
+			if (entry.Sampler != VK_NULL_HANDLE)
+				vkDestroySampler(m_Vulkan.GetDevice(), entry.Sampler, nullptr);
+			break;
+		}
+		if (entry.HasBindlessIndex)
+			m_FreeBindlessIndices.push_back(entry.BindlessIndex);
+	}
+
+	void VulkanRhiDevice::DrainRetireQueue()
+	{
+		if (m_RetireQueue.empty())
+			return;
+
+		uint64_t completed = m_Vulkan.GetCompletedTimelineValue();
+
+		size_t write = 0;
+		for (size_t i = 0; i < m_RetireQueue.size(); i++)
+		{
+			if (m_RetireQueue[i].Stamp <= completed)
+			{
+				FreeRetireEntry(m_RetireQueue[i]);
+				continue;
+			}
+			if (write != i)
+				m_RetireQueue[write] = std::move(m_RetireQueue[i]);
+			write++;
+		}
+		m_RetireQueue.resize(write);
+	}
+
+	void VulkanRhiDevice::DrainRetireQueueUnconditional()
+	{
+		for (const RetireEntry& entry : m_RetireQueue)
+			FreeRetireEntry(entry);
+		m_RetireQueue.clear();
+	}
+
+	bool VulkanRhiDevice::IsBindlessIndexLive(uint32_t index) const
+	{
+		if (index >= m_NextBindlessIndex)
+			return false;
+		for (uint32_t freeIndex : m_FreeBindlessIndices)
+		{
+			if (freeIndex == index)
+				return false;
+		}
+		return true;
 	}
 
 	// ---- Buffer -----------------------------------------------------------------
@@ -430,8 +826,23 @@ namespace rhi {
 	void VulkanRhiDevice::DestroyBuffer(BufferHandle handle)
 	{
 		if (VulkanBuffer* buffer = m_Buffers.Get(handle))
-			buffer->Shutdown();
+		{
+			if (buffer->IsExternal())
+				buffer->Shutdown(); // slot release only - the mesh owns the VkBuffer
+			else
+				QueueBufferForDestruction(buffer->GetHandle(), buffer->GetAllocation());
+		}
 		TE_CORE_ASSERT(m_Buffers.Release(handle), "destroying an invalid/stale RHI buffer");
+	}
+
+	BufferHandle VulkanRhiDevice::AdoptExternalBuffer(VkBuffer buffer, VmaAllocation allocation)
+	{
+		TE_CORE_ASSERT(m_Initialized, "RHI buffer adopted before the device");
+		BufferHandle handle = m_Buffers.Acquire();
+		VulkanBuffer* adopted = new VulkanBuffer();
+		adopted->Adopt(buffer, allocation);
+		m_Buffers.Slots[handle.Index].Object.reset(adopted);
+		return handle;
 	}
 
 	void VulkanRhiDevice::SetBufferData(BufferHandle handle, const void* data, uint64_t size, uint64_t offset)
@@ -451,11 +862,44 @@ namespace rhi {
 	TextureHandle VulkanRhiDevice::CreateTexture(const TextureDesc& desc, const void* initialData, uint64_t dataSize, const char* debugName)
 	{
 		TE_CORE_ASSERT(m_Initialized, "RHI texture created before the device");
+
 		TextureHandle handle = m_Textures.Acquire();
-		VulkanTexture2D* texture = new VulkanTexture2D(desc.Width, desc.Height);
-		if (initialData && dataSize > 0)
-			texture->SetData(const_cast<void*>(initialData), (uint32_t)dataSize);
-		m_Textures.Slots[handle.Index].Object.reset(texture);
+		VulkanTexture2D* texture = nullptr;
+		if (desc.MipLevels == 1)
+		{
+			// P-D: a genuinely single-level texture (the baked-mip ctor
+			// uploads each level directly - no blit chain). The fixed
+			// sampler's maxLod-0 clamp + one level is what reproduces
+			// Wisp's single-level filtering exactly.
+			std::vector<std::vector<uint8_t>> levels;
+			if (initialData && dataSize > 0)
+				levels.push_back(std::vector<uint8_t>((const uint8_t*)initialData, (const uint8_t*)initialData + dataSize));
+			else
+				levels.push_back(std::vector<uint8_t>((size_t)desc.Width * desc.Height * 4, 0));
+			texture = new VulkanTexture2D(desc.Width, desc.Height, levels);
+		}
+		else
+		{
+			texture = new VulkanTexture2D(desc.Width, desc.Height);
+			if (initialData && dataSize > 0)
+				texture->SetData(const_cast<void*>(initialData), (uint32_t)dataSize);
+		}
+		std::unique_ptr<VulkanTextureEntry> entry = std::make_unique<VulkanTextureEntry>();
+		entry->Owned.reset(texture);
+		m_Textures.Slots[handle.Index].Object = std::move(entry);
+
+		// The texture's ctor already wrote its bindless descriptor with its
+		// baked (linear, repeat) sampler; for the single-level path, re-write
+		// with the fixed sampler the caller chose (UPDATE_AFTER_BIND - safe
+		// at creation). Multi-mip textures keep the baked sampler (a fixed
+		// maxLod-0 sampler would defeat the mip chain).
+		if (desc.MipLevels == 1)
+		{
+			WriteTextureDescriptor(texture->GetBindlessIndex(), texture->GetImageView(),
+				desc.Sampler == SamplerKind::Nearest ? m_FixedSamplerNearest : m_FixedSamplerLinear,
+				VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		}
+		(void)debugName;
 		return handle;
 	}
 
@@ -464,25 +908,79 @@ namespace rhi {
 	{
 		TE_CORE_ASSERT(m_Initialized, "RHI texture created before the device");
 		TextureHandle handle = m_Textures.Acquire();
-		m_Textures.Slots[handle.Index].Object.reset(new VulkanTexture2D(width, height, mipLevels));
+		std::unique_ptr<VulkanTextureEntry> entry = std::make_unique<VulkanTextureEntry>();
+		entry->Owned.reset(new VulkanTexture2D(width, height, mipLevels));
+		m_Textures.Slots[handle.Index].Object = std::move(entry);
+		(void)debugName;
+		return handle;
+	}
+
+	TextureHandle VulkanRhiDevice::CreateTextureFromNativeImage(void* nativeImage, uint32_t width, uint32_t height, Format format)
+	{
+		TE_CORE_ASSERT(m_Initialized, "RHI wrapped image created before the device");
+		TE_CORE_ASSERT(nativeImage, "wrapping a null image");
+		TE_CORE_ASSERT(format == Format::B8G8R8A8_UNORM || format == Format::R8G8B8A8_UNORM,
+			"wrapped images are BGRA8/RGBA8 only (the framebuffer/texture formats in use)");
+
+		VkImage image = (VkImage)nativeImage;
+
+		VkImageViewCreateInfo viewInfo{};
+		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewInfo.image = image;
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format = ToVkFormat(format);
+		viewInfo.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		VkImageView view = VK_NULL_HANDLE;
+		VulkanCheckResult(vkCreateImageView(m_Vulkan.GetDevice(), &viewInfo, nullptr, &view), "vkCreateImageView", __FILE__, __LINE__);
+		m_Vulkan.SetObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t)view, "Wrapped External Image View");
+
+		uint32_t index = AllocateBindlessTextureIndex();
+		WriteTextureDescriptor(index, view, m_FixedSamplerLinear, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+		TextureHandle handle = m_Textures.Acquire();
+		std::unique_ptr<VulkanTextureEntry> entry = std::make_unique<VulkanTextureEntry>();
+		entry->Wrapped.reset(new VulkanWrappedTexture(index, view));
+		m_Textures.Slots[handle.Index].Object = std::move(entry);
+		(void)width; (void)height;
 		return handle;
 	}
 
 	void VulkanRhiDevice::DestroyTexture(TextureHandle handle)
 	{
+		// The wrapped-image path retires the view + slot only (the image is
+		// caller-owned; the fixed sampler must never enter a retire entry).
+		// The owned path's Release invokes the queuing VulkanTexture2D dtor.
+		if (VulkanTextureEntry* entry = m_Textures.Get(handle))
+		{
+			if (entry->IsWrapped())
+				QueueTextureForDestruction(VK_NULL_HANDLE, VK_NULL_HANDLE, entry->Wrapped->GetView(), VK_NULL_HANDLE, entry->Wrapped->GetBindlessIndex());
+		}
 		TE_CORE_ASSERT(m_Textures.Release(handle), "destroying an invalid/stale RHI texture");
 	}
 
 	void VulkanRhiDevice::SetTextureData(TextureHandle handle, const void* data, uint64_t size)
 	{
-		if (VulkanTexture2D* texture = m_Textures.Get(handle))
-			texture->SetData(const_cast<void*>(data), (uint32_t)size);
+		if (VulkanTextureEntry* entry = m_Textures.Get(handle))
+		{
+			if (entry->Owned)
+				entry->Owned->SetData(const_cast<void*>(data), (uint32_t)size);
+		}
 	}
 
 	void VulkanRhiDevice::UpdateTextureBakedMips(TextureHandle handle, const std::vector<std::vector<uint8_t>>& mipLevels)
 	{
-		if (VulkanTexture2D* texture = m_Textures.Get(handle))
-			texture->UpdateBakedMips(texture->GetWidth(), texture->GetHeight(), mipLevels);
+		if (VulkanTextureEntry* entry = m_Textures.Get(handle))
+		{
+			if (entry->Owned)
+				entry->Owned->UpdateBakedMips(entry->Owned->GetWidth(), entry->Owned->GetHeight(), mipLevels);
+		}
+	}
+
+	uint32_t VulkanRhiDevice::GetBindlessIndex(TextureHandle handle)
+	{
+		if (const VulkanTextureEntry* entry = m_Textures.Get(handle))
+			return entry->GetBindlessIndex();
+		return 0;
 	}
 
 	// ---- Sampler / Shader / Pipeline ----------------------------------------------
@@ -500,7 +998,7 @@ namespace rhi {
 	void VulkanRhiDevice::DestroySampler(SamplerHandle handle)
 	{
 		if (VulkanSampler* sampler = m_Samplers.Get(handle))
-			sampler->Shutdown();
+			QueueSamplerForDestruction(sampler->GetHandle());
 		TE_CORE_ASSERT(m_Samplers.Release(handle), "destroying an invalid/stale RHI sampler");
 	}
 
@@ -517,7 +1015,7 @@ namespace rhi {
 	void VulkanRhiDevice::DestroyShader(ShaderHandle handle)
 	{
 		if (VulkanShaderModule* shader = m_Shaders.Get(handle))
-			shader->Shutdown();
+			QueueShaderForDestruction(shader->GetHandle());
 		TE_CORE_ASSERT(m_Shaders.Release(handle), "destroying an invalid/stale RHI shader");
 	}
 
@@ -535,12 +1033,14 @@ namespace rhi {
 		spec.PreserveDestinationAlpha = desc.PreserveDestinationAlpha;
 		spec.DepthTestEnable = desc.DepthTestEnable;
 		spec.DepthWriteEnable = desc.DepthWriteEnable;
+		spec.DepthCompareOp = ToVkCompareOp(desc.DepthCompareOp);
 		spec.ColorAttachmentFormat = ToVkFormat(desc.ColorAttachmentFormat);
 		spec.DepthAttachmentFormat = ToVkFormat(desc.DepthAttachmentFormat);
 		spec.PushConstantSize = desc.PushConstantSize;
 		spec.PushConstantStages = desc.PushConstantStages;
-		// P-A1: no descriptor set layout (the global bindless set lands in
-		// P-A3; the renderers' own pipelines still use their layouts).
+		// P-A3: every RHI pipeline shares the global bindless set (set 0);
+		// the layout is baked in implicitly - no PipelineStateDesc field.
+		spec.DescriptorSetLayout = m_GlobalSetLayout;
 
 		PipelineHandle handle = m_Pipelines.Acquire();
 		VulkanPipeline* pipeline = new VulkanPipeline();
@@ -552,7 +1052,7 @@ namespace rhi {
 	void VulkanRhiDevice::DestroyPipeline(PipelineHandle handle)
 	{
 		if (VulkanPipeline* pipeline = m_Pipelines.Get(handle))
-			pipeline->Shutdown();
+			QueuePipelineForDestruction(pipeline->GetHandle(), pipeline->GetLayout());
 		TE_CORE_ASSERT(m_Pipelines.Release(handle), "destroying an invalid/stale RHI pipeline");
 	}
 
@@ -586,6 +1086,13 @@ namespace rhi {
 	CommandList* VulkanRhiDevice::GetCommandList(CommandListHandle handle)
 	{
 		return m_CommandLists.Get(handle);
+	}
+
+	CommandList* VulkanRhiDevice::AdoptCommandBuffer(void* commandBuffer)
+	{
+		// P-D: wraps the frame loop's live command buffer (already begun -
+		// no Begin/End). The caller deletes the returned list.
+		return new VulkanCommandList(this, (VkCommandBuffer)commandBuffer);
 	}
 
 	QueueHandle VulkanRhiDevice::GetQueue(QueueKind kind)
@@ -697,22 +1204,33 @@ namespace rhi {
 
 	VkImage VulkanRhiDevice::GetTextureImage(TextureHandle handle) const
 	{
-		if (const VulkanTexture2D* texture = m_Textures.Get(handle))
-			return texture->GetImage();
+		// Wrapped entries carry no owned image (the caller owns it); the
+		// image-level accessors only ever serve owned textures.
+		if (const VulkanTextureEntry* entry = m_Textures.Get(handle))
+		{
+			if (entry->Owned)
+				return entry->Owned->GetImage();
+		}
 		return VK_NULL_HANDLE;
 	}
 
 	VkImageView VulkanRhiDevice::GetTextureView(TextureHandle handle) const
 	{
-		if (const VulkanTexture2D* texture = m_Textures.Get(handle))
-			return texture->GetImageView();
+		if (const VulkanTextureEntry* entry = m_Textures.Get(handle))
+		{
+			if (entry->Owned)
+				return entry->Owned->GetImageView();
+		}
 		return VK_NULL_HANDLE;
 	}
 
 	VkExtent2D VulkanRhiDevice::GetTextureSize(TextureHandle handle) const
 	{
-		if (const VulkanTexture2D* texture = m_Textures.Get(handle))
-			return { texture->GetWidth(), texture->GetHeight() };
+		if (const VulkanTextureEntry* entry = m_Textures.Get(handle))
+		{
+			if (entry->Owned)
+				return { entry->Owned->GetWidth(), entry->Owned->GetHeight() };
+		}
 		return { 1, 1 };
 	}
 

@@ -21,6 +21,17 @@ namespace TinyEngine {
 		void Init(VulkanDevice& device, VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible, const std::string& debugName);
 		void Shutdown();
 
+		// P-C: a borrowed entry - the buffer (and its allocation) belong to
+		// someone else (an engine Mesh's VulkanVertexBuffer/VulkanIndexBuffer);
+		// Shutdown then only clears the borrow, never destroys.
+		void Adopt(VkBuffer buffer, VmaAllocation allocation)
+		{
+			m_External = true;
+			m_Buffer = buffer;
+			m_Allocation = allocation;
+		}
+		bool IsExternal() const { return m_External; }
+
 		// Only valid on a host visible buffer, writes straight into the
 		// persistently mapped pointer. There's no explicit flush call because
 		// VMA's HOST_ACCESS_SEQUENTIAL_WRITE + the allocator's automatic
@@ -37,6 +48,7 @@ namespace TinyEngine {
 
 		VkBuffer GetHandle() const { return m_Buffer; }
 		VkDeviceSize GetSize() const { return m_Size; }
+		VmaAllocation GetAllocation() const { return m_Allocation; }
 
 	private:
 		VulkanDevice* m_Device = nullptr;
@@ -44,6 +56,7 @@ namespace TinyEngine {
 		VmaAllocation m_Allocation = VK_NULL_HANDLE;
 		VkDeviceSize m_Size = 0;
 		void* m_MappedData = nullptr;
+		bool m_External = false;
 	};
 
 }

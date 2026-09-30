@@ -349,6 +349,11 @@ namespace TinyEngine {
 		// way samplerAnisotropy is.
 		m_TimestampPeriodNs = properties.limits.timestampPeriod;
 
+		// P-C: the mesh/debug push blocks reach 132 bytes; the spec minimum
+		// is 128, so the RHI checks this at Init rather than discovering it
+		// as a vkCreatePipelineLayout validation error.
+		m_MaxPushConstantsSize = properties.limits.maxPushConstantsSize;
+
 		uint32_t queueFamilyCount = 0;
 		vkGetPhysicalDeviceQueueFamilyProperties(m_PhysicalDevice, &queueFamilyCount, nullptr);
 		std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
@@ -389,6 +394,14 @@ namespace TinyEngine {
 		vulkan12Features.descriptorBindingVariableDescriptorCount = VK_TRUE;
 		vulkan12Features.runtimeDescriptorArray = VK_TRUE;
 		vulkan12Features.timelineSemaphore = VK_TRUE;
+		// The global bindless set writes descriptors after binding
+		// (UPDATE_AFTER_BIND) - the three per-type feature bits the
+		// descriptorIndexing umbrella does NOT enable. The
+		// update-unused-while-pending bit is a safety net, not the reuse
+		// mechanism (the retire queue is).
+		vulkan12Features.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+		vulkan12Features.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+		vulkan12Features.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
 		vulkan12Features.pNext = &vulkan13Features;
 
 		// Anisotropic filtering is an optional feature (unlike GL, where a max

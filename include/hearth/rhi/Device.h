@@ -35,6 +35,7 @@ namespace rhi {
 		Format   PixelFormat = Format::R8G8B8A8_UNORM;
 		bool     RenderTarget = false; // VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
 		bool     DepthTarget = false;  // VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+		SamplerKind Sampler = SamplerKind::Linear;
 	};
 
 	struct SamplerDesc
@@ -59,6 +60,7 @@ namespace rhi {
 		bool     PreserveDestinationAlpha = false;
 		bool     DepthTestEnable = false;
 		bool     DepthWriteEnable = false;
+		CompareOp DepthCompareOp = CompareOp::Less;
 		Format   ColorAttachmentFormat = Format::Undefined;
 		Format   DepthAttachmentFormat = Format::Undefined;
 
@@ -83,9 +85,15 @@ namespace rhi {
 		// cooker baked them); one buffer->image copy per level, no blits.
 		virtual TextureHandle CreateTextureFromBakedMips(uint32_t width, uint32_t height,
 			const std::vector<std::vector<uint8_t>>& mipLevels, const char* debugName) = 0;
+		// P-D: wraps an image the CALLER owns (a framebuffer's colour
+		// attachment) as a samplable texture - the RHI owns only the view +
+		// bindless slot; DestroyTexture releases just those.
+		virtual TextureHandle CreateTextureFromNativeImage(void* nativeImage, uint32_t width, uint32_t height, Format format) = 0;
 		virtual void DestroyTexture(TextureHandle handle) = 0;
 		virtual void SetTextureData(TextureHandle handle, const void* data, uint64_t size) = 0;
 		virtual void UpdateTextureBakedMips(TextureHandle handle, const std::vector<std::vector<uint8_t>>& mipLevels) = 0;
+		// The texture's slot in the global bindless set (the per-draw push).
+		virtual uint32_t GetBindlessIndex(TextureHandle handle) = 0;
 
 		virtual SamplerHandle CreateSampler(const SamplerDesc& desc, const char* debugName) = 0;
 		virtual void DestroySampler(SamplerHandle handle) = 0;
@@ -99,6 +107,11 @@ namespace rhi {
 		virtual CommandListHandle CreateCommandList(QueueHandle queue, uint32_t threadIndex) = 0;
 		virtual void DestroyCommandList(CommandListHandle handle) = 0;
 		virtual CommandList* GetCommandList(CommandListHandle handle) = 0;
+
+		// P-D: adopts a LIVE frame command buffer (begun by the frame loop)
+		// as a CommandList for the calling layer to record into. No Begin/
+		// End - the buffer is already recording. The caller deletes it.
+		virtual CommandList* AdoptCommandBuffer(void* commandBuffer) = 0;
 
 		virtual QueueHandle GetQueue(QueueKind kind) = 0;
 

@@ -39,9 +39,17 @@ namespace rhi {
 		virtual void BeginRendering(std::span<const AttachmentDesc> attachments) = 0;
 		virtual void EndRendering() = 0;
 
+		// Dynamic viewport/scissor state (P-D added these when Wisp ported -
+		// the renderers kept raw vkCmdSetViewport/Scissor through P-C).
+		virtual void SetViewport(float x, float y, float width, float height, float minDepth = 0.0f, float maxDepth = 1.0f) = 0;
+		virtual void SetScissor(int32_t x, int32_t y, uint32_t width, uint32_t height) = 0;
+
 		virtual void Barrier(std::span<const BarrierDesc> barriers) = 0;
 
 		virtual void BindPipeline(PipelineHandle pipeline) = 0;
+		// Binds the device's global bindless descriptor set at set 0. Must
+		// follow BindPipeline (the set layout lives in the pipeline layout).
+		virtual void BindGlobalSet() = 0;
 		virtual void PushConstants(uint32_t stages, uint32_t offset, const void* data, uint32_t size) = 0;
 		virtual void BindVertexBuffer(BufferHandle buffer, uint64_t offset = 0) = 0;
 		virtual void BindIndexBuffer(BufferHandle buffer, uint64_t offset = 0) = 0;

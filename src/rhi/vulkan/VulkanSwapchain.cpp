@@ -1,6 +1,8 @@
 #include "tepch.h"
 #include "Platform/Vulkan/VulkanSwapchain.h"
 
+#include "Platform/Vulkan/VulkanDeviceRegistry.h"
+
 #include <GLFW/glfw3.h>
 
 namespace TinyEngine {
@@ -456,6 +458,10 @@ namespace TinyEngine {
 		submitInfo.pSignalSemaphores = bothSignals;
 
 		VK_CHECK(vkQueueSubmit(m_Device->GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
+
+		// P-A3: once per frame after submit - free every resource whose
+		// retire stamp the GPU has now passed.
+		GetVulkanRhiDevice().DrainRetireQueue();
 
 		m_ImagesInFlight[imageIndex] = timelineValue;
 		m_FrameLastValues[frameIndex] = timelineValue;

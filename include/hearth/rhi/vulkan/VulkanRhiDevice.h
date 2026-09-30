@@ -53,6 +53,9 @@ namespace rhi {
 		void EndRendering() override;
 		void Barrier(std::span<const BarrierDesc> barriers) override;
 		void BindPipeline(PipelineHandle pipeline) override;
+		void BindGlobalSet() override;
+		void SetViewport(float x, float y, float width, float height, float minDepth = 0.0f, float maxDepth = 1.0f) override;
+		void SetScissor(int32_t x, int32_t y, uint32_t width, uint32_t height) override;
 		void PushConstants(uint32_t stages, uint32_t offset, const void* data, uint32_t size) override;
 		void BindVertexBuffer(BufferHandle buffer, uint64_t offset = 0) override;
 		void BindIndexBuffer(BufferHandle buffer, uint64_t offset = 0) override;
@@ -79,6 +82,40 @@ namespace rhi {
 		VkPipelineLayout m_BoundLayout = VK_NULL_HANDLE;
 	};
 
+	// P-D: a wrapped external image (WrapUIImageHandle) - the caller owns the
+	// VkImage; the RHI owns only the view + the bindless slot. Destruction
+	// retires the view + slot (no image, no sampler - the shared fixed
+	// sampler must never enter a retire entry).
+	class VulkanWrappedTexture
+	{
+	public:
+		VulkanWrappedTexture(uint32_t bindlessIndex, VkImageView view)
+			: BindlessIndex(bindlessIndex), View(view) {}
+
+		uint32_t GetBindlessIndex() const { return BindlessIndex; }
+		VkImageView GetView() const { return View; }
+
+	private:
+		uint32_t BindlessIndex = 0;
+		VkImageView View = VK_NULL_HANDLE;
+	};
+
+	// One TextureHandle space: an entry is EITHER an owned VulkanTexture2D
+	// or a wrapped external image (never both - two tables sharing the same
+	// handle type would alias {index, generation} and mis-resolve).
+	struct VulkanTextureEntry
+	{
+		std::unique_ptr<VulkanTexture2D> Owned;
+		std::unique_ptr<VulkanWrappedTexture> Wrapped;
+
+		bool IsWrapped() const { return Wrapped != nullptr; }
+		uint32_t GetBindlessIndex() const
+		{
+			return Wrapped ? Wrapped->GetBindlessIndex()
+				: (Owned ? Owned->GetBindlessIndex() : 0);
+		}
+	};
+
 	class VulkanRhiDevice final : public Device
 	{
 	public:
@@ -92,18 +129,53 @@ namespace rhi {
 		void ShutdownDevice();
 		VulkanDevice* GetVulkan() { return &m_Vulkan; }
 
+		// ---- P-A3: the global bindless set + the retire queue ----------
+		// One UPDATE_AFTER_BIND set per device; every texture gets a
+		// stable BindlessIndex written into it at creation. Destroyed
+		// resources are deferred through the retire queue until the
+		// graphics timeline passes the submit that could reference them.
+		static constexpr uint32_t kBindlessTextures = 16384;
+		static constexpr uint32_t kBindlessBuffers = 4096;
+
+		VkDescriptorSet GetGlobalDescriptorSet() const { return m_GlobalSet; }
+		VkDescriptorSetLayout GetGlobalSetLayout() const { return m_GlobalSetLayout; }
+
+		uint32_t AllocateBindlessTextureIndex();
+		void WriteTextureDescriptor(uint32_t index, VkImageView imageView, VkSampler sampler, VkImageLayout layout);
+		void QueueTextureForDestruction(VkImage image, VmaAllocation allocation,
+			VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex);
+		void QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation);
+		void QueuePipelineForDestruction(VkPipeline pipeline, VkPipelineLayout layout);
+		void QueueShaderForDestruction(VkShaderModule shader);
+		void QueueSamplerForDestruction(VkSampler sampler);
+
+		// Frees every entry whose stamp the GPU has passed (called once
+		// per frame after submit). Shutdown drains unconditionally instead.
+		void DrainRetireQueue();
+		void DrainRetireQueueUnconditional();
+
+		// Dev/test accessor: true while the index is handed out and not yet
+		// recycled by a drain (the self-test's assertions).
+		bool IsBindlessIndexLive(uint32_t index) const;
+
 		// ---- Device -------------------------------------------------------
 		BufferHandle CreateBuffer(const BufferDesc& desc, const char* debugName) override;
 		void DestroyBuffer(BufferHandle handle) override;
+		// P-C: borrows an engine-owned buffer (a Mesh's VulkanVertexBuffer/
+		// VulkanIndexBuffer) as a non-owning handle so draws can go through
+		// BufferHandles; DestroyBuffer on it releases the slot only.
+		BufferHandle AdoptExternalBuffer(VkBuffer buffer, VmaAllocation allocation);
 		void SetBufferData(BufferHandle handle, const void* data, uint64_t size, uint64_t offset = 0) override;
 		void UploadBufferViaStaging(BufferHandle handle, const void* data, uint64_t size) override;
 
 		TextureHandle CreateTexture(const TextureDesc& desc, const void* initialData, uint64_t dataSize, const char* debugName) override;
 		TextureHandle CreateTextureFromBakedMips(uint32_t width, uint32_t height,
 			const std::vector<std::vector<uint8_t>>& mipLevels, const char* debugName) override;
+		TextureHandle CreateTextureFromNativeImage(void* nativeImage, uint32_t width, uint32_t height, Format format) override;
 		void DestroyTexture(TextureHandle handle) override;
 		void SetTextureData(TextureHandle handle, const void* data, uint64_t size) override;
 		void UpdateTextureBakedMips(TextureHandle handle, const std::vector<std::vector<uint8_t>>& mipLevels) override;
+		uint32_t GetBindlessIndex(TextureHandle handle) override;
 
 		SamplerHandle CreateSampler(const SamplerDesc& desc, const char* debugName) override;
 		void DestroySampler(SamplerHandle handle) override;
@@ -117,6 +189,7 @@ namespace rhi {
 		CommandListHandle CreateCommandList(QueueHandle queue, uint32_t threadIndex) override;
 		void DestroyCommandList(CommandListHandle handle) override;
 		CommandList* GetCommandList(CommandListHandle handle) override;
+		CommandList* AdoptCommandBuffer(void* commandBuffer) override;
 
 		QueueHandle GetQueue(QueueKind kind) override;
 
@@ -142,6 +215,33 @@ namespace rhi {
 		VkPipelineLayout GetPipelineLayout(PipelineHandle handle) const;
 
 	private:
+		// P-A3: the global bindless set and the retire
+		// queue. The stamp is the value the NEXT submit will signal
+		// - the earliest submission that could reference the object.
+		void CreateGlobalBindlessSet();
+		void DestroyGlobalBindlessSet();
+		void CreateFixedSamplers();
+
+		struct RetireEntry
+		{
+			enum class Kind : uint8_t { Texture, Buffer, Pipeline, Shader, Sampler };
+
+			Kind        Kind_ = Kind::Texture;
+			uint64_t    Stamp = 0;
+			VkImage     Image = VK_NULL_HANDLE;
+			VmaAllocation Allocation = VK_NULL_HANDLE;
+			VkImageView ImageView = VK_NULL_HANDLE;
+			VkSampler   Sampler = VK_NULL_HANDLE;
+			VkBuffer    Buffer = VK_NULL_HANDLE;
+			VkPipeline  Pipeline = VK_NULL_HANDLE;
+			VkPipelineLayout Layout = VK_NULL_HANDLE;
+			VkShaderModule ShaderModule = VK_NULL_HANDLE;
+			uint32_t    BindlessIndex = 0;
+			bool        HasBindlessIndex = false;
+		};
+		void QueueRetire(RetireEntry&& entry);
+		void FreeRetireEntry(const RetireEntry& entry);
+
 		// The generation-checked handle table: fixed-slot objects + a
 		// freelist; a freed slot bumps its generation. Deferred destruction
 		// (the retire queue) arrives in P-A3 - P-A1 destroys synchronously.
@@ -216,12 +316,25 @@ namespace rhi {
 		float m_ClearColour[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
 
 		Table<BufferHandle, VulkanBuffer> m_Buffers;
-		Table<TextureHandle, VulkanTexture2D> m_Textures;
+		Table<TextureHandle, VulkanTextureEntry> m_Textures;
 		Table<SamplerHandle, VulkanSampler> m_Samplers;
 		Table<ShaderHandle, VulkanShaderModule> m_Shaders;
 		Table<PipelineHandle, VulkanPipeline> m_Pipelines;
 		Table<CommandListHandle, VulkanCommandList> m_CommandLists;
 		Table<SwapchainHandle, VulkanSwapchain> m_Swapchains;
+
+		// P-D: the two fixed samplers Wisp picks from at texture creation
+		// (baked with Wisp's exact parameters - single-level filtering).
+		VkSampler m_FixedSamplerLinear = VK_NULL_HANDLE;
+		VkSampler m_FixedSamplerNearest = VK_NULL_HANDLE;
+
+		VkDescriptorSetLayout m_GlobalSetLayout = VK_NULL_HANDLE;
+		VkDescriptorPool m_GlobalSetPool = VK_NULL_HANDLE;
+		VkDescriptorSet m_GlobalSet = VK_NULL_HANDLE;
+
+		std::vector<uint32_t> m_FreeBindlessIndices;
+		uint32_t m_NextBindlessIndex = 0;
+		std::vector<RetireEntry> m_RetireQueue;
 
 		QueueHandle m_GraphicsQueue;
 	};

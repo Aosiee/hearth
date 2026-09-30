@@ -39,5 +39,26 @@ namespace rhi {
 		Compute,
 	};
 
+	// The depth compare operations a pipeline can declare (P-C added this
+	// when the Renderer3D family ported; extended on demand).
+	enum class CompareOp : uint8_t
+	{
+		Never,
+		Less,
+		LessOrEqual,
+		Equal,
+		GreaterOrEqual,
+		Greater,
+		Always,
+	};
+
+	// The small fixed sampler table a texture picks from at creation
+	// (the per-texture sampler choice).
+	enum class SamplerKind : uint8_t
+	{
+		Linear,
+		Nearest,
+	};
+
 } // namespace rhi
 } // namespace TinyEngine
