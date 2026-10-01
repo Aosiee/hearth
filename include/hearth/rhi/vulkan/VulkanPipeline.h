@@ -16,7 +16,7 @@ namespace TinyEngine {
 	// Everything Vulkan needs baked into a pipeline object up front: shader
 	// stages, vertex layout, and fixed function state (blend/depth/raster).
 	// State that was runtime toggles in OpenGL (glEnable(GL_BLEND) etc, see
-	// RendererAPI::Init) has to be known at pipeline creation time here
+	// The pipeline description) has to be known at pipeline creation time here
 	// instead.
 	//
 	// Depth support (DepthTestEnable/DepthWriteEnable/DepthCompareOp/

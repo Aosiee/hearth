@@ -94,7 +94,7 @@ namespace TinyEngine {
 		blendAttachment.blendEnable = spec.EnableBlend ? VK_TRUE : VK_FALSE;
 		if (spec.EnableBlend)
 		{
-			// Matches OpenGLRendererAPI::Init's glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA).
+			// The standard SRC_ALPHA / ONE_MINUS_SRC_ALPHA blend.
 			blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
 			blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
 			blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;

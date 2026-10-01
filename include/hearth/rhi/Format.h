@@ -1,6 +1,6 @@
 #pragma once
 
-// Exactly the formats in use today, mapped 1:1 to VkFormat in the Vulkan
+// Exactly the formats in use today, mapped 1:1 to the backend's pixel formats in the
 // implementation. Extended on demand, never speculatively.
 
 #include <cstdint>

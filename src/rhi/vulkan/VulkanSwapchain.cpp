@@ -1,7 +1,7 @@
 #include "tepch.h"
 #include "Platform/Vulkan/VulkanSwapchain.h"
 
-#include "Platform/Vulkan/VulkanDeviceRegistry.h"
+#include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
 
 #include <GLFW/glfw3.h>
 

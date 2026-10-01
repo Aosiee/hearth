@@ -2,10 +2,22 @@
 #include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
 
 #include "TinyEngine/Core/Log.h"
+#include "TinyEngine/Core/Application.h"
+#include "TinyEngine/Core/RhiDevice.h"
 
 #include <algorithm>
 
 namespace TinyEngine {
+
+	rhi::VulkanRhiDevice& GetVulkanRhiDevice()
+	{
+		Application* app = Application::TryGet();
+		TE_CORE_ASSERT(app, "GetVulkanRhiDevice() ran before the Application (and its Engine) exists!");
+		RhiDevice& rhi = app->GetEngine().Get<RhiDevice>();
+		rhi.EnsureDevice(nullptr); // ASSERTS if called before the first window created the device (the guard)
+		return static_cast<rhi::VulkanRhiDevice&>(rhi.Get());
+	}
+
 namespace rhi {
 
 	namespace {

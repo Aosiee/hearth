@@ -24,7 +24,7 @@ namespace rhi {
 	{
 		uint64_t Size = 0;
 		bool     HostVisible = false;
-		bool     StorageUsage = false; // VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		bool     StorageUsage = false; // storage-buffer usage
 	};
 
 	struct TextureDesc
@@ -33,8 +33,8 @@ namespace rhi {
 		uint32_t Height = 1;
 		uint32_t MipLevels = 1;
 		Format   PixelFormat = Format::R8G8B8A8_UNORM;
-		bool     RenderTarget = false; // VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-		bool     DepthTarget = false;  // VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+		bool     RenderTarget = false; // colour-attachment usage
+		bool     DepthTarget = false;  // depth-attachment usage
 		SamplerKind Sampler = SamplerKind::Linear;
 	};
 
@@ -65,7 +65,7 @@ namespace rhi {
 		Format   DepthAttachmentFormat = Format::Undefined;
 
 		uint32_t PushConstantSize = 0;
-		uint32_t PushConstantStages = 1; // VK_SHADER_STAGE_VERTEX_BIT = 1; VERTEX|FRAGMENT = 1 | 16
+		uint32_t PushConstantStages = 1; // vertex = 1; VERTEX|FRAGMENT = 1 | 16
 	};
 
 	enum class ShaderStage : uint8_t { Vertex, Fragment, Compute };

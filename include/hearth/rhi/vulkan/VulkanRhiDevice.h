@@ -340,4 +340,17 @@ namespace rhi {
 	};
 
 } // namespace rhi
+
+// P-E: the entry points for Platform/Vulkan code to reach the RHI impl
+// (replaces the deleted VulkanDeviceRegistry shim). EnsureDevice is a
+// no-op once the first window has created the device - callers that may
+// run pre-window must go through the subsystem's EnsureDevice(window)
+// directly (the helper asserts without a window).
+rhi::VulkanRhiDevice& GetVulkanRhiDevice();
+
+inline VulkanDevice& GetVulkanDevice()
+{
+	return *GetVulkanRhiDevice().GetVulkan();
+}
+
 } // namespace TinyEngine
