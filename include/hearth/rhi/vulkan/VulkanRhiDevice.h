@@ -85,19 +85,23 @@ namespace rhi {
 	// P-D: a wrapped external image (WrapUIImageHandle) - the caller owns the
 	// VkImage; the RHI owns only the view + the bindless slot. Destruction
 	// retires the view + slot (no image, no sampler - the shared fixed
-	// sampler must never enter a retire entry).
+	// sampler must never enter a retire entry). The image itself is recorded
+	// so barrier targets resolve through the same handle (P4-B: the
+	// swapchain images are adopted this way).
 	class VulkanWrappedTexture
 	{
 	public:
-		VulkanWrappedTexture(uint32_t bindlessIndex, VkImageView view)
-			: BindlessIndex(bindlessIndex), View(view) {}
+		VulkanWrappedTexture(uint32_t bindlessIndex, VkImageView view, VkImage image)
+			: BindlessIndex(bindlessIndex), View(view), Image(image) {}
 
 		uint32_t GetBindlessIndex() const { return BindlessIndex; }
 		VkImageView GetView() const { return View; }
+		VkImage GetImage() const { return Image; }
 
 	private:
 		uint32_t BindlessIndex = 0;
 		VkImageView View = VK_NULL_HANDLE;
+		VkImage Image = VK_NULL_HANDLE;
 	};
 
 	// One TextureHandle space: an entry is EITHER an owned VulkanTexture2D
@@ -172,6 +176,7 @@ namespace rhi {
 		TextureHandle CreateTextureFromBakedMips(uint32_t width, uint32_t height,
 			const std::vector<std::vector<uint8_t>>& mipLevels, const char* debugName) override;
 		TextureHandle CreateTextureFromNativeImage(void* nativeImage, uint32_t width, uint32_t height, Format format) override;
+		TextureHandle AdoptExternalImage(void* nativeImage) override;
 		void DestroyTexture(TextureHandle handle) override;
 		void SetTextureData(TextureHandle handle, const void* data, uint64_t size) override;
 		void UpdateTextureBakedMips(TextureHandle handle, const std::vector<std::vector<uint8_t>>& mipLevels) override;

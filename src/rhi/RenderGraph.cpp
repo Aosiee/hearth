@@ -130,7 +130,10 @@ namespace rg {
 					writesImport = true;
 			}
 			if (writesImport || (m_Passes[i].Accesses.empty() && m_Passes[i].ExecuteFn))
+			{
+				m_Passes[i].Live = true; // mark immediately so the propagation below never re-adds a seed
 				live.push_back(i);
+			}
 		}
 
 		// Propagate liveness backward: any pass that wrote a texture a live
@@ -160,9 +163,6 @@ namespace rg {
 				}
 			}
 		}
-
-		for (uint32_t i : live)
-			m_Passes[i].Live = true;
 
 		// ---- Topological order (stable Kahn's): a pass depends on every
 		// pass that wrote a texture it reads.
@@ -243,6 +243,17 @@ namespace rg {
 
 		for (uint32_t i : m_Order)
 			m_CompiledPasses.push_back({ m_Passes[i].Name });
+
+		// Keep the final per-texture states for the frame-end carry.
+		m_FinalStates = state;
+	}
+
+	TextureState RenderGraph::GetFinalState(RGTexture texture) const
+	{
+		TE_CORE_ASSERT(texture.Valid(), "querying an invalid virtual texture");
+		if (!m_FinalStates.empty() && texture.Index < m_FinalStates.size())
+			return m_FinalStates[texture.Index];
+		return m_Textures[texture.Index].State;
 	}
 
 	PassResources RenderGraph::ResolveResources(Device& device, const Pass& pass)

@@ -305,6 +305,16 @@ namespace TinyEngine {
 			m_Device->SetObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t)m_ImageViews[i], "Swapchain Image View " + std::to_string(i));
 		}
 
+		// P4-B: adopt each image into the RHI as a barrier-target handle so
+		// the RenderGraph can Import it (no view/bindless slot - the graph
+		// only barriers it).
+		{
+			m_ImageHandles.clear();
+			rhi::Device& rhiDevice = GetVulkanRhiDevice();
+			for (size_t i = 0; i < m_Images.size(); i++)
+				m_ImageHandles.push_back(rhiDevice.AdoptExternalImage((void*)m_Images[i]));
+		}
+
 		// Fresh set of images means none of them belong to an in-flight frame yet.
 		m_ImagesInFlight.assign(m_Images.size(), 0);
 
@@ -358,6 +368,20 @@ namespace TinyEngine {
 			vkDestroyImageView(device, view, nullptr);
 		m_ImageViews.clear();
 		m_Images.clear();
+
+		// P4-B: release the adopted image handles (nothing is destroyed -
+		// the images themselves die with the swapchain above). Requires the
+		// RHI device to still be alive - the window (and this swapchain)
+		// dies before Engine::Shutdown tears the device down.
+		{
+			rhi::Device& rhiDevice = GetVulkanRhiDevice();
+			for (rhi::TextureHandle handle : m_ImageHandles)
+			{
+				if (rhi::IsValid(handle))
+					rhiDevice.DestroyTexture(handle);
+			}
+			m_ImageHandles.clear();
+		}
 
 		if (m_DepthImageView != VK_NULL_HANDLE)
 			vkDestroyImageView(device, m_DepthImageView, nullptr);

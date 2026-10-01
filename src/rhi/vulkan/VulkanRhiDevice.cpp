@@ -72,8 +72,12 @@ namespace rhi {
 			{
 			case TextureState::Undefined:    return VK_IMAGE_LAYOUT_UNDEFINED;
 			case TextureState::RenderTarget: return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			case TextureState::DepthWrite:   return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-			case TextureState::DepthRead:    return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+			// The engine's depth images are D32 depth-only (no stencil
+			// aspect anywhere), so the depth-only layouts are the ones every
+			// scope + tracker uses - P4-C caught the depth-view barriers
+			// deriving the STENCIL variants and mismatching.
+			case TextureState::DepthWrite:   return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+			case TextureState::DepthRead:    return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
 			case TextureState::ShaderRead:   return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			case TextureState::TransferSrc:  return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 			case TextureState::TransferDst:  return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -531,7 +535,7 @@ namespace rhi {
 		}
 		for (const auto& slot : m_Textures.Slots)
 		{
-			if (slot.Alive && slot.Object && slot.Object->IsWrapped())
+			if (slot.Alive && slot.Object && slot.Object->IsWrapped() && slot.Object->Wrapped->GetView() != VK_NULL_HANDLE)
 				QueueTextureForDestruction(VK_NULL_HANDLE, VK_NULL_HANDLE, slot.Object->Wrapped->GetView(), VK_NULL_HANDLE, slot.Object->Wrapped->GetBindlessIndex());
 		}
 		m_Swapchains.Clear();
@@ -951,9 +955,23 @@ namespace rhi {
 
 		TextureHandle handle = m_Textures.Acquire();
 		std::unique_ptr<VulkanTextureEntry> entry = std::make_unique<VulkanTextureEntry>();
-		entry->Wrapped.reset(new VulkanWrappedTexture(index, view));
+		entry->Wrapped.reset(new VulkanWrappedTexture(index, view, image));
 		m_Textures.Slots[handle.Index].Object = std::move(entry);
 		(void)width; (void)height;
+		return handle;
+	}
+
+	TextureHandle VulkanRhiDevice::AdoptExternalImage(void* nativeImage)
+	{
+		TE_CORE_ASSERT(m_Initialized, "RHI image adopted before the device");
+		TE_CORE_ASSERT(nativeImage, "adopting a null image");
+
+		// Barrier-target adoption: no view, no bindless slot (the sentinel
+		// index never recycles). Destroy releases the handle only.
+		TextureHandle handle = m_Textures.Acquire();
+		std::unique_ptr<VulkanTextureEntry> entry = std::make_unique<VulkanTextureEntry>();
+		entry->Wrapped.reset(new VulkanWrappedTexture(~0u, VK_NULL_HANDLE, (VkImage)nativeImage));
+		m_Textures.Slots[handle.Index].Object = std::move(entry);
 		return handle;
 	}
 
@@ -961,10 +979,11 @@ namespace rhi {
 	{
 		// The wrapped-image path retires the view + slot only (the image is
 		// caller-owned; the fixed sampler must never enter a retire entry).
-		// The owned path's Release invokes the queuing VulkanTexture2D dtor.
+		// Barrier-only adoptions have no view - nothing to retire. The owned
+		// path's Release invokes the queuing VulkanTexture2D dtor.
 		if (VulkanTextureEntry* entry = m_Textures.Get(handle))
 		{
-			if (entry->IsWrapped())
+			if (entry->IsWrapped() && entry->Wrapped->GetView() != VK_NULL_HANDLE)
 				QueueTextureForDestruction(VK_NULL_HANDLE, VK_NULL_HANDLE, entry->Wrapped->GetView(), VK_NULL_HANDLE, entry->Wrapped->GetBindlessIndex());
 		}
 		TE_CORE_ASSERT(m_Textures.Release(handle), "destroying an invalid/stale RHI texture");
@@ -991,7 +1010,12 @@ namespace rhi {
 	uint32_t VulkanRhiDevice::GetBindlessIndex(TextureHandle handle)
 	{
 		if (const VulkanTextureEntry* entry = m_Textures.Get(handle))
-			return entry->GetBindlessIndex();
+		{
+			// Barrier-only adoptions carry the ~0u sentinel (no bindless
+			// slot) - never hand it to a caller.
+			uint32_t index = entry->GetBindlessIndex();
+			return index == ~0u ? 0 : index;
+		}
 		return 0;
 	}
 
@@ -1216,12 +1240,15 @@ namespace rhi {
 
 	VkImage VulkanRhiDevice::GetTextureImage(TextureHandle handle) const
 	{
-		// Wrapped entries carry no owned image (the caller owns it); the
-		// image-level accessors only ever serve owned textures.
+		// Wrapped entries carry no owned image (the caller owns it) - but the
+		// adopted image is recorded so barrier targets resolve through the
+		// same handle (P4-B).
 		if (const VulkanTextureEntry* entry = m_Textures.Get(handle))
 		{
 			if (entry->Owned)
 				return entry->Owned->GetImage();
+			if (entry->Wrapped)
+				return entry->Wrapped->GetImage();
 		}
 		return VK_NULL_HANDLE;
 	}

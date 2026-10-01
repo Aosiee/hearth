@@ -46,6 +46,12 @@ namespace rg_tests {
 			handle.Index = TextureCreates;
 			return handle;
 		}
+		rhi::TextureHandle AdoptExternalImage(void*) override
+		{
+			rhi::TextureHandle handle;
+			handle.Index = 100; // a stable adopted handle
+			return handle;
+		}
 		void DestroyTexture(rhi::TextureHandle) override {}
 		void SetTextureData(rhi::TextureHandle, const void*, uint64_t) override {}
 		void UpdateTextureBakedMips(rhi::TextureHandle, const std::vector<std::vector<uint8_t>>&) override {}
@@ -472,6 +478,29 @@ namespace rg_tests {
 		graph.Execute(device, commandList);
 
 		CHECK(seenImported.Index == 7);
+	}
+
+	TEST_CASE("rendergraph: a seed that reads what it writes is not double-counted")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+		rg::RGTexture other = graph.CreateTexture({});
+
+		// Regression: the liveness propagation once re-added seed passes
+		// whose own write matched their own read (they were not marked live
+		// before the propagation ran), inflating the live count past the
+		// topological order and tripping the cycle assert.
+		auto& selfPass = graph.AddPass("SelfReadWrite");
+		selfPass.Read(other, rhi::TextureState::ShaderRead);
+		selfPass.Write(other, rhi::TextureState::RenderTarget);
+		selfPass.Write(exported, rhi::TextureState::Present);
+		selfPass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+
+		REQUIRE(graph.GetCompiledPasses().size() == 1);
+		CHECK(NameAt(graph, 0) == "SelfReadWrite");
 	}
 
 } // namespace rg_tests

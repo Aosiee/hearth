@@ -89,6 +89,10 @@ namespace rhi {
 		// attachment) as a samplable texture - the RHI owns only the view +
 		// bindless slot; DestroyTexture releases just those.
 		virtual TextureHandle CreateTextureFromNativeImage(void* nativeImage, uint32_t width, uint32_t height, Format format) = 0;
+		// P4-B: adopts an externally-owned image as a barrier target only
+		// (no view, no bindless slot - the swapchain images). Destroy
+		// releases the handle; nothing is destroyed.
+		virtual TextureHandle AdoptExternalImage(void* nativeImage) = 0;
 		virtual void DestroyTexture(TextureHandle handle) = 0;
 		virtual void SetTextureData(TextureHandle handle, const void* data, uint64_t size) = 0;
 		virtual void UpdateTextureBakedMips(TextureHandle handle, const std::vector<std::vector<uint8_t>>& mipLevels) = 0;

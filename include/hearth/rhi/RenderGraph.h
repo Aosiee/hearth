@@ -132,6 +132,12 @@ namespace rg {
 		const std::vector<CompiledPass>& GetCompiledPasses() const { return m_CompiledPasses; }
 		const std::vector<CompiledBarrier>& GetCompiledBarriers() const { return m_CompiledBarriers; }
 
+		// The state each texture is in after the last ordered access (its
+		// initial state if never accessed) - the frame-end carry writes
+		// these back to the external trackers so the next frame's Imports
+		// seed correctly.
+		TextureState GetFinalState(RGTexture texture) const;
+
 	private:
 		struct AccessRecord
 		{
@@ -165,6 +171,7 @@ namespace rg {
 		std::vector<uint32_t> m_Order;
 		std::vector<CompiledPass> m_CompiledPasses;
 		std::vector<CompiledBarrier> m_CompiledBarriers;
+		std::vector<TextureState> m_FinalStates;
 	};
 
 } // namespace rg

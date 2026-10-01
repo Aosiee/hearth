@@ -2,6 +2,7 @@
 
 #include "Platform/Vulkan/VulkanCommon.h"
 #include "Platform/Vulkan/VulkanDevice.h"
+#include "TinyEngine/RHI/RHI.h"
 
 struct GLFWwindow;
 
@@ -52,6 +53,14 @@ namespace TinyEngine {
 		VkImageView GetImageView(uint32_t index) const { return m_ImageViews[index]; }
 		uint32_t GetImageCount() const { return (uint32_t)m_Images.size(); }
 
+		// P4-B: each swapchain image is adopted into the RHI as a
+		// barrier-target handle (the RenderGraph imports it per frame).
+		TinyEngine::rhi::TextureHandle GetImageHandle(uint32_t index) const
+		{
+			TE_CORE_ASSERT(index < m_ImageHandles.size(), "swapchain image index out of range");
+			return m_ImageHandles[index];
+		}
+
 		// One depth image total, not one per swapchain image - unlike colour,
 		// nothing ever needs to read back a previous frame's depth contents,
 		// every frame's depth pass starts from a fresh clear, so there's no
@@ -98,6 +107,7 @@ namespace TinyEngine {
 
 		std::vector<VkImage> m_Images;
 		std::vector<VkImageView> m_ImageViews;
+		std::vector<TinyEngine::rhi::TextureHandle> m_ImageHandles;
 
 		// Render finished semaphores are indexed by swapchain image, not frame in
 		// flight. Present operates on a specific image index, and acquiring images
