@@ -1,0 +1,345 @@
+#include "tepch.h"
+#include "TinyEngine/RenderGraph/RenderGraph.h"
+
+#include <algorithm>
+
+namespace TinyEngine {
+namespace rg {
+
+	using namespace rhi;
+
+	// ---- TransientTexturePool ----------------------------------------------------
+
+	TextureHandle TransientTexturePool::GetOrCreate(Device& device, uint32_t key, const TextureDesc& desc, const char* debugName)
+	{
+		if (key >= m_Entries.size())
+			m_Entries.resize(key + 1);
+
+		Entry& entry = m_Entries[key];
+		if (!IsValid(entry.Handle))
+		{
+			entry.Desc = desc;
+			entry.Handle = device.CreateTexture(desc, nullptr, 0, debugName);
+		}
+		return entry.Handle;
+	}
+
+	TextureState TransientTexturePool::GetLastState(uint32_t key) const
+	{
+		if (key >= m_Entries.size() || !IsValid(m_Entries[key].Handle))
+			return TextureState::Undefined;
+		return m_Entries[key].LastState;
+	}
+
+	void TransientTexturePool::SetLastState(uint32_t key, TextureState state)
+	{
+		if (key < m_Entries.size())
+			m_Entries[key].LastState = state;
+	}
+
+	// ---- RenderGraph ------------------------------------------------------------
+
+	RenderGraph::RenderGraph(TransientTexturePool& pool)
+		: m_Pool(pool)
+	{
+	}
+
+	RGTexture RenderGraph::Import(TextureHandle handle, TextureState currentState)
+	{
+		VirtualTexture texture;
+		texture.Handle = handle;
+		texture.State = currentState;
+		texture.Imported = true;
+		m_Textures.push_back(texture);
+		return { (uint32_t)m_Textures.size() - 1 };
+	}
+
+	RGTexture RenderGraph::CreateTexture(const TextureDesc& desc)
+	{
+		VirtualTexture texture;
+		texture.Desc = desc;
+		// The physical texture may already exist from a previous frame; its
+		// carried state seeds the derivation at Compile time.
+		texture.State = m_Pool.GetLastState((uint32_t)m_Textures.size());
+		m_Textures.push_back(texture);
+		return { (uint32_t)m_Textures.size() - 1 };
+	}
+
+	RenderGraph::PassBuilder::PassBuilder(RenderGraph& graph, uint32_t passIndex)
+		: m_Graph(&graph), m_PassIndex(passIndex)
+	{
+	}
+
+	RGTexture RenderGraph::PassBuilder::Read(RGTexture texture, TextureState state)
+	{
+		TE_CORE_ASSERT(texture.Valid(), "reading an invalid virtual texture");
+		AccessRecord access;
+		access.Texture = texture;
+		access.State = state;
+		access.Write = false;
+		m_Graph->m_Passes[m_PassIndex].Accesses.push_back(access);
+		return texture;
+	}
+
+	RGTexture RenderGraph::PassBuilder::Write(RGTexture texture, TextureState state)
+	{
+		TE_CORE_ASSERT(texture.Valid(), "writing an invalid virtual texture");
+		AccessRecord access;
+		access.Texture = texture;
+		access.State = state;
+		access.Write = true;
+		m_Graph->m_Passes[m_PassIndex].Accesses.push_back(access);
+		return texture;
+	}
+
+	void RenderGraph::PassBuilder::SetExecute(std::function<void(CommandList&, const PassResources&)> fn)
+	{
+		m_Graph->m_Passes[m_PassIndex].ExecuteFn = std::move(fn);
+	}
+
+	RenderGraph::PassBuilder& RenderGraph::AddPass(std::string_view name)
+	{
+		Pass pass;
+		pass.Name = std::string(name);
+		m_Passes.push_back(std::move(pass));
+		// Direct `new` (not make_unique): the constructor is private to
+		// RenderGraph and friendship does not extend to std::make_unique.
+		m_Builders.push_back(std::unique_ptr<PassBuilder>(new PassBuilder(*this, (uint32_t)m_Passes.size() - 1)));
+		return *m_Builders.back();
+	}
+
+	void RenderGraph::Compile()
+	{
+		m_Order.clear();
+		m_CompiledPasses.clear();
+		m_CompiledBarriers.clear();
+
+		// ---- Culling: a pass is live if it writes an imported resource, or
+		// a live pass reads something it wrote. Passes with a side effect
+		// (an ExecuteFn but no accesses) stay live.
+		for (Pass& pass : m_Passes)
+			pass.Live = false;
+
+		std::vector<uint32_t> live;
+		for (uint32_t i = 0; i < m_Passes.size(); i++)
+		{
+			bool writesImport = false;
+			for (const AccessRecord& access : m_Passes[i].Accesses)
+			{
+				if (access.Write && m_Textures[access.Texture.Index].Imported)
+					writesImport = true;
+			}
+			if (writesImport || (m_Passes[i].Accesses.empty() && m_Passes[i].ExecuteFn))
+				live.push_back(i);
+		}
+
+		// Propagate liveness backward: any pass that wrote a texture a live
+		// pass reads is itself live.
+		for (size_t cursor = 0; cursor < live.size(); cursor++)
+		{
+			const Pass& consumer = m_Passes[live[cursor]];
+			for (const AccessRecord& access : consumer.Accesses)
+			{
+				if (access.Write)
+					continue;
+				for (uint32_t i = 0; i < m_Passes.size(); i++)
+				{
+					if (m_Passes[i].Live)
+						continue;
+					for (const AccessRecord& produced : m_Passes[i].Accesses)
+					{
+						if (produced.Write && produced.Texture == access.Texture)
+						{
+							m_Passes[i].Live = true;
+							live.push_back(i);
+							break;
+						}
+					}
+					if (m_Passes[i].Live)
+						break;
+				}
+			}
+		}
+
+		for (uint32_t i : live)
+			m_Passes[i].Live = true;
+
+		// ---- Topological order (stable Kahn's): a pass depends on every
+		// pass that wrote a texture it reads.
+		std::vector<uint32_t> inDegree(m_Passes.size(), 0);
+		std::vector<std::vector<uint32_t>> dependents(m_Passes.size());
+		for (uint32_t i = 0; i < m_Passes.size(); i++)
+		{
+			if (!m_Passes[i].Live)
+				continue;
+			for (const AccessRecord& access : m_Passes[i].Accesses)
+			{
+				if (access.Write)
+					continue;
+				for (uint32_t j = 0; j < m_Passes.size(); j++)
+				{
+					if (!m_Passes[j].Live || j == i)
+						continue;
+					for (const AccessRecord& produced : m_Passes[j].Accesses)
+					{
+						if (produced.Write && produced.Texture == access.Texture)
+						{
+							dependents[j].push_back(i);
+							inDegree[i]++;
+						}
+					}
+				}
+			}
+		}
+
+		std::vector<uint32_t> ready;
+		for (uint32_t i = 0; i < m_Passes.size(); i++)
+		{
+			if (m_Passes[i].Live && inDegree[i] == 0)
+				ready.push_back(i);
+		}
+
+		while (!ready.empty())
+		{
+			// Stable: pop the smallest index (registration order).
+			auto smallest = std::min_element(ready.begin(), ready.end());
+			uint32_t i = *smallest;
+			ready.erase(smallest);
+			m_Order.push_back(i);
+			for (uint32_t dependent : dependents[i])
+			{
+				if (--inDegree[dependent] == 0)
+					ready.push_back(dependent);
+			}
+		}
+
+		TE_CORE_ASSERT(m_Order.size() == live.size(), "RenderGraph contains a dependency cycle - the graph must be acyclic");
+
+		// ---- Barrier derivation: walk the ordered accesses per texture,
+		// tracking state; a state change between consecutive users is a
+		// barrier edge recorded against the later pass.
+		std::vector<TextureState> state(m_Textures.size());
+		for (uint32_t i = 0; i < m_Textures.size(); i++)
+			state[i] = m_Textures[i].State;
+
+		for (uint32_t orderIndex = 0; orderIndex < m_Order.size(); orderIndex++)
+		{
+			Pass& pass = m_Passes[m_Order[orderIndex]];
+			for (const AccessRecord& access : pass.Accesses)
+			{
+				TextureState before = state[access.Texture.Index];
+				if (before != access.State)
+				{
+					CompiledBarrier barrier;
+					barrier.PassName = pass.Name;
+					barrier.TextureIndex = access.Texture.Index;
+					barrier.From = before;
+					barrier.To = access.State;
+					m_CompiledBarriers.push_back(barrier);
+				}
+				state[access.Texture.Index] = access.State;
+			}
+		}
+
+		for (uint32_t i : m_Order)
+			m_CompiledPasses.push_back({ m_Passes[i].Name });
+	}
+
+	PassResources RenderGraph::ResolveResources(Device& device, const Pass& pass)
+	{
+		PassResources resources;
+		for (const AccessRecord& access : pass.Accesses)
+		{
+			// One entry per distinct texture.
+			bool found = false;
+			for (PassResources::TextureRef& ref : resources.Textures)
+			{
+				if (ref.Virtual == access.Texture)
+				{
+					found = true;
+					break;
+				}
+			}
+			if (found)
+				continue;
+
+			PassResources::TextureRef ref;
+			ref.Virtual = access.Texture;
+			if (m_Textures[access.Texture.Index].Imported)
+				ref.Handle = m_Textures[access.Texture.Index].Handle;
+			else
+				ref.Handle = m_Pool.GetOrCreate(device, access.Texture.Index, m_Textures[access.Texture.Index].Desc, "RenderGraph Transient");
+			resources.Textures.push_back(ref);
+		}
+		return resources;
+	}
+
+	void RenderGraph::Execute(Device& device, CommandList& commandList)
+	{
+		// The per-texture state machine, walked identically to Compile so
+		// the emitted edges match GetCompiledBarriers() exactly - including
+		// passes without a lambda (their declarations still move state).
+		std::vector<TextureState> state(m_Textures.size());
+		for (uint32_t i = 0; i < m_Textures.size(); i++)
+			state[i] = m_Textures[i].State;
+
+		// Scratch storage: the barrier descriptors point into these for the
+		// duration of the CommandList::Barrier call only. The reserve covers
+		// every barrier in the frame, so reallocation cannot occur mid-pass
+		// and the pointers stay stable.
+		std::vector<BarrierDesc> barriers;
+		std::vector<TextureBarrier> textureBarriers;
+		barriers.reserve(m_CompiledBarriers.size());
+		textureBarriers.reserve(m_CompiledBarriers.size());
+
+		for (uint32_t i : m_Order)
+		{
+			Pass& pass = m_Passes[i];
+
+			barriers.clear();
+			textureBarriers.clear();
+			for (const AccessRecord& access : pass.Accesses)
+			{
+				if (state[access.Texture.Index] == access.State)
+					continue;
+
+				textureBarriers.push_back({});
+				TextureBarrier& textureBarrier = textureBarriers.back();
+				textureBarrier.Texture = m_Textures[access.Texture.Index].Imported
+					? m_Textures[access.Texture.Index].Handle
+					: m_Pool.GetOrCreate(device, access.Texture.Index, m_Textures[access.Texture.Index].Desc, "RenderGraph Transient");
+				textureBarrier.From = state[access.Texture.Index];
+				textureBarrier.To = access.State;
+				textureBarrier.BaseMip = 0;
+				textureBarrier.MipCount = 1;
+				textureBarrier.BaseLayer = 0;
+				textureBarrier.LayerCount = 1;
+
+				BarrierDesc barrierDesc;
+				barrierDesc.Textures = &textureBarrier;
+				barrierDesc.TextureCount = 1;
+				barriers.push_back(barrierDesc);
+
+				state[access.Texture.Index] = access.State;
+			}
+			if (!barriers.empty())
+				commandList.Barrier(barriers);
+
+			if (pass.ExecuteFn)
+			{
+				PassResources resources = ResolveResources(device, pass);
+				pass.ExecuteFn(commandList, resources);
+			}
+		}
+
+		// Record the transients' final states so the next frame's graph
+		// seeds its derivation from where this frame left them.
+		for (uint32_t i = 0; i < m_Textures.size(); i++)
+		{
+			if (!m_Textures[i].Imported)
+				m_Pool.SetLastState(i, state[i]);
+		}
+	}
+
+} // namespace rg
+} // namespace TinyEngine

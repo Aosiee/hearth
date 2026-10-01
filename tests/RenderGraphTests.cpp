@@ -1,0 +1,478 @@
+#pragma once
+
+// The RenderGraph core suite: topological ordering, culling, barrier
+// derivation, transient-pool reuse, and the Execute barrier emission,
+// against mock Device/CommandList (the core is pure data-flow - no GPU).
+
+#include "TinyEngine/RenderGraph/RenderGraph.h"
+
+#include <doctest/doctest.h>
+
+#include <string>
+
+namespace TinyEngine {
+namespace rg_tests {
+
+	// ---- Mocks ------------------------------------------------------------------
+
+	class MockDevice final : public rhi::Device
+	{
+	public:
+		uint32_t TextureCreates = 0;
+
+		rhi::BufferHandle CreateBuffer(const rhi::BufferDesc&, const char*) override { return {}; }
+		void DestroyBuffer(rhi::BufferHandle) override {}
+		void SetBufferData(rhi::BufferHandle, const void*, uint64_t, uint64_t) override {}
+		void UploadBufferViaStaging(rhi::BufferHandle, const void*, uint64_t) override {}
+
+		rhi::TextureHandle CreateTexture(const rhi::TextureDesc&, const void*, uint64_t, const char*) override
+		{
+			TextureCreates++;
+			rhi::TextureHandle handle;
+			handle.Index = TextureCreates; // distinct per call, never ~0u
+			return handle;
+		}
+		rhi::TextureHandle CreateTextureFromBakedMips(uint32_t, uint32_t, const std::vector<std::vector<uint8_t>>&, const char*) override
+		{
+			TextureCreates++;
+			rhi::TextureHandle handle;
+			handle.Index = TextureCreates;
+			return handle;
+		}
+		rhi::TextureHandle CreateTextureFromNativeImage(void*, uint32_t, uint32_t, rhi::Format) override
+		{
+			TextureCreates++;
+			rhi::TextureHandle handle;
+			handle.Index = TextureCreates;
+			return handle;
+		}
+		void DestroyTexture(rhi::TextureHandle) override {}
+		void SetTextureData(rhi::TextureHandle, const void*, uint64_t) override {}
+		void UpdateTextureBakedMips(rhi::TextureHandle, const std::vector<std::vector<uint8_t>>&) override {}
+		uint32_t GetBindlessIndex(rhi::TextureHandle) override { return 0; }
+
+		rhi::SamplerHandle CreateSampler(const rhi::SamplerDesc&, const char*) override { return {}; }
+		void DestroySampler(rhi::SamplerHandle) override {}
+		rhi::ShaderHandle CreateShader(std::span<const uint32_t>, rhi::ShaderStage, const char*) override { return {}; }
+		void DestroyShader(rhi::ShaderHandle) override {}
+		rhi::PipelineHandle CreatePipeline(const rhi::PipelineStateDesc&, const char*) override { return {}; }
+		void DestroyPipeline(rhi::PipelineHandle) override {}
+
+		rhi::CommandListHandle CreateCommandList(rhi::QueueHandle, uint32_t) override { return {}; }
+		void DestroyCommandList(rhi::CommandListHandle) override {}
+		rhi::CommandList* GetCommandList(rhi::CommandListHandle) override { return nullptr; }
+		rhi::CommandList* AdoptCommandBuffer(void*) override { return nullptr; }
+
+		rhi::QueueHandle GetQueue(rhi::QueueKind) override { return {}; }
+		uint64_t Submit(rhi::QueueHandle, std::span<const rhi::CommandListHandle>,
+			std::span<const rhi::TimelineWait>, std::span<const rhi::TimelineSignal>) override { return 0; }
+		void WaitIdle() override {}
+
+		rhi::SwapchainHandle CreateSwapchain(void*) override { return {}; }
+		void DestroySwapchain(rhi::SwapchainHandle) override {}
+	};
+
+	class MockCommandList final : public rhi::CommandList
+	{
+	public:
+		std::vector<std::pair<rhi::TextureState, rhi::TextureState>> Barriers;
+
+		void Begin() override {}
+		void End() override {}
+		void BeginRendering(std::span<const rhi::AttachmentDesc>) override {}
+		void EndRendering() override {}
+		void SetViewport(float, float, float, float, float, float) override {}
+		void SetScissor(int32_t, int32_t, uint32_t, uint32_t) override {}
+
+		void Barrier(std::span<const rhi::BarrierDesc> barriers) override
+		{
+			for (const rhi::BarrierDesc& barrier : barriers)
+			{
+				for (uint32_t i = 0; i < barrier.TextureCount; i++)
+					Barriers.push_back({ barrier.Textures[i].From, barrier.Textures[i].To });
+			}
+		}
+
+		void BindPipeline(rhi::PipelineHandle) override {}
+		void BindGlobalSet() override {}
+		void PushConstants(uint32_t, uint32_t, const void*, uint32_t) override {}
+		void BindVertexBuffer(rhi::BufferHandle, uint64_t) override {}
+		void BindIndexBuffer(rhi::BufferHandle, uint64_t) override {}
+		void Draw(uint32_t, uint32_t, uint32_t, uint32_t) override {}
+		void DrawIndexed(uint32_t, uint32_t, uint32_t, int32_t, uint32_t) override {}
+		void Dispatch(uint32_t, uint32_t, uint32_t) override {}
+		void CopyBufferToBuffer(rhi::BufferHandle, rhi::BufferHandle, uint64_t, uint64_t, uint64_t) override {}
+		void CopyBufferToTexture(rhi::BufferHandle, rhi::TextureHandle, uint32_t, uint32_t) override {}
+		void CopyTextureToBuffer(rhi::TextureHandle, rhi::BufferHandle, uint32_t, uint32_t) override {}
+		void BeginLabel(const char*) override {}
+		void EndLabel() override {}
+		void WriteTimestamp(uint32_t) override {}
+	};
+
+	namespace {
+
+		std::string NameAt(const rg::RenderGraph& graph, size_t index)
+		{
+			return graph.GetCompiledPasses()[index].Name;
+		}
+
+		rhi::TextureHandle ImportHandle(uint32_t index)
+		{
+			rhi::TextureHandle handle;
+			handle.Index = index;
+			return handle;
+		}
+
+		rg::RenderGraph MakeGraph(rg::TransientTexturePool& pool)
+		{
+			return rg::RenderGraph(pool);
+		}
+
+	} // namespace
+
+	TEST_CASE("rendergraph: a reader is ordered after its writer")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture target = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+		rg::RGTexture scene = graph.CreateTexture({});
+
+		auto& scenePass = graph.AddPass("Scene");
+		scenePass.Write(scene, rhi::TextureState::RenderTarget);
+		scenePass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		auto& presentPass = graph.AddPass("Present");
+		presentPass.Read(scene, rhi::TextureState::ShaderRead);
+		presentPass.Write(target, rhi::TextureState::Present);
+		presentPass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+
+		REQUIRE(graph.GetCompiledPasses().size() == 2);
+		CHECK(NameAt(graph, 0) == "Scene");
+		CHECK(NameAt(graph, 1) == "Present");
+	}
+
+	TEST_CASE("rendergraph: independent passes keep registration order")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture a = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+		rg::RGTexture b = graph.Import(ImportHandle(2), rhi::TextureState::Undefined);
+
+		auto& first = graph.AddPass("First");
+		first.Write(a, rhi::TextureState::Present);
+		first.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		auto& second = graph.AddPass("Second");
+		second.Write(b, rhi::TextureState::Present);
+		second.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+
+		REQUIRE(graph.GetCompiledPasses().size() == 2);
+		CHECK(NameAt(graph, 0) == "First");
+		CHECK(NameAt(graph, 1) == "Second");
+	}
+
+	TEST_CASE("rendergraph: culling drops passes whose outputs are never consumed")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+		rg::RGTexture orphanA = graph.CreateTexture({});
+		rg::RGTexture orphanB = graph.CreateTexture({});
+
+		auto& deadProducer = graph.AddPass("DeadProducer");
+		deadProducer.Write(orphanA, rhi::TextureState::RenderTarget);
+		deadProducer.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		auto& deadConsumer = graph.AddPass("DeadConsumer");
+		deadConsumer.Read(orphanA, rhi::TextureState::ShaderRead);
+		deadConsumer.Write(orphanB, rhi::TextureState::RenderTarget);
+		deadConsumer.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		auto& live = graph.AddPass("Live");
+		live.Write(exported, rhi::TextureState::Present);
+		live.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+
+		REQUIRE(graph.GetCompiledPasses().size() == 1);
+		CHECK(NameAt(graph, 0) == "Live");
+	}
+
+	TEST_CASE("rendergraph: culling keeps a producer chain that feeds an export")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+		rg::RGTexture intermediate = graph.CreateTexture({});
+
+		auto& producer = graph.AddPass("Producer");
+		producer.Write(intermediate, rhi::TextureState::RenderTarget);
+		producer.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		auto& consumer = graph.AddPass("Consumer");
+		consumer.Read(intermediate, rhi::TextureState::ShaderRead);
+		consumer.Write(exported, rhi::TextureState::Present);
+		consumer.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+
+		REQUIRE(graph.GetCompiledPasses().size() == 2);
+		CHECK(NameAt(graph, 0) == "Producer");
+		CHECK(NameAt(graph, 1) == "Consumer");
+	}
+
+	TEST_CASE("rendergraph: barrier derivation between consecutive users")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+		rg::RGTexture scene = graph.CreateTexture({});
+
+		auto& scenePass = graph.AddPass("Scene");
+		scenePass.Write(scene, rhi::TextureState::RenderTarget);
+		scenePass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		auto& samplePass = graph.AddPass("Sample");
+		samplePass.Read(scene, rhi::TextureState::ShaderRead);
+		samplePass.Write(exported, rhi::TextureState::Present);
+		samplePass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+
+		// Three edges: the transient's first use (Undefined -> RenderTarget),
+		// the state change (RenderTarget -> ShaderRead), and the export
+		// (Undefined -> Present). Assert the specific edge that matters.
+		bool found = false;
+		for (const auto& barrier : graph.GetCompiledBarriers())
+		{
+			if (barrier.From == rhi::TextureState::RenderTarget && barrier.To == rhi::TextureState::ShaderRead)
+			{
+				found = true;
+				CHECK(barrier.PassName == "Sample");
+			}
+		}
+		CHECK(found);
+	}
+
+	TEST_CASE("rendergraph: same-state neighbours need no barrier")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+		rg::RGTexture scene = graph.CreateTexture({});
+
+		auto& scenePass = graph.AddPass("Scene");
+		scenePass.Write(scene, rhi::TextureState::RenderTarget);
+		scenePass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		auto& moreScene = graph.AddPass("MoreScene");
+		moreScene.Write(scene, rhi::TextureState::RenderTarget);
+		moreScene.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		auto& present = graph.AddPass("Present");
+		present.Read(scene, rhi::TextureState::ShaderRead);
+		present.Write(exported, rhi::TextureState::Present);
+		present.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+
+		// The two adjacent RenderTarget writes must NOT produce a
+		// RenderTarget -> RenderTarget edge; the RenderTarget -> ShaderRead
+		// edge and the first-use / export edges are the only ones.
+		for (const auto& barrier : graph.GetCompiledBarriers())
+		{
+			bool sameStateEdge = (barrier.From == rhi::TextureState::RenderTarget) && (barrier.To == rhi::TextureState::RenderTarget);
+			CHECK_FALSE(sameStateEdge);
+		}
+
+		bool found = false;
+		for (const auto& barrier : graph.GetCompiledBarriers())
+		{
+			if (barrier.From == rhi::TextureState::RenderTarget && barrier.To == rhi::TextureState::ShaderRead)
+			{
+				found = true;
+				CHECK(barrier.PassName == "Present");
+			}
+		}
+		CHECK(found);
+	}
+
+	TEST_CASE("rendergraph: an import's current state seeds the first barrier")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		// The external world left the image in ShaderRead; the first pass
+		// renders into it.
+		rg::RGTexture target = graph.Import(ImportHandle(1), rhi::TextureState::ShaderRead);
+
+		auto& render = graph.AddPass("Render");
+		render.Write(target, rhi::TextureState::RenderTarget);
+		render.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+
+		REQUIRE(graph.GetCompiledBarriers().size() == 1);
+		CHECK(graph.GetCompiledBarriers()[0].From == rhi::TextureState::ShaderRead);
+		CHECK(graph.GetCompiledBarriers()[0].To == rhi::TextureState::RenderTarget);
+	}
+
+	TEST_CASE("rendergraph: two live transients never alias one physical texture")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+
+		rhi::TextureDesc desc;
+		desc.Width = 800;
+		desc.Height = 600;
+		desc.RenderTarget = true;
+		rg::RGTexture viewA = graph.CreateTexture(desc);
+		rg::RGTexture viewB = graph.CreateTexture(desc);
+
+		auto& viewAPass = graph.AddPass("ViewA");
+		viewAPass.Write(viewA, rhi::TextureState::RenderTarget);
+		viewAPass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		auto& viewBPass = graph.AddPass("ViewB");
+		viewBPass.Write(viewB, rhi::TextureState::RenderTarget);
+		viewBPass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		auto& present = graph.AddPass("Present");
+		present.Read(viewA, rhi::TextureState::ShaderRead);
+		present.Read(viewB, rhi::TextureState::ShaderRead);
+		present.Write(exported, rhi::TextureState::Present);
+		present.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+
+		MockDevice device;
+		MockCommandList commandList;
+		graph.Execute(device, commandList);
+
+		// Two live virtuals with the same desc: two physical textures.
+		CHECK(device.TextureCreates == 2);
+	}
+
+	TEST_CASE("rendergraph: the pool reuses a transient across frames and carries its state")
+	{
+		rg::TransientTexturePool pool;
+		MockDevice device;
+		MockCommandList commandList;
+
+		// Round one: the scene is rendered and sampled.
+		{
+			rg::RenderGraph graph(pool);
+			rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+			rg::RGTexture scene = graph.CreateTexture({});
+
+			auto& scenePass = graph.AddPass("Scene");
+			scenePass.Write(scene, rhi::TextureState::RenderTarget);
+			scenePass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+			auto& sample = graph.AddPass("Sample");
+			sample.Read(scene, rhi::TextureState::ShaderRead);
+			sample.Write(exported, rhi::TextureState::Present);
+			sample.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+			graph.Compile();
+			graph.Execute(device, commandList);
+		}
+
+		// Round two: the same virtual index resolves to the same physical
+		// texture, and the derivation seeds from ShaderRead (the state the
+		// last frame left) - so the next write emits ShaderRead -> RenderTarget,
+		// not Undefined -> RenderTarget.
+		{
+			rg::RenderGraph graph(pool);
+			rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+			rg::RGTexture scene = graph.CreateTexture({});
+
+			auto& scenePass = graph.AddPass("Scene");
+			scenePass.Write(scene, rhi::TextureState::RenderTarget);
+			scenePass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+			auto& sample = graph.AddPass("Sample");
+			sample.Read(scene, rhi::TextureState::ShaderRead);
+			sample.Write(exported, rhi::TextureState::Present);
+			sample.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+			graph.Compile();
+			graph.Execute(device, commandList);
+
+			// No new allocation for the scene transient in round two.
+			CHECK(device.TextureCreates == 1);
+
+			bool seeded = false;
+			for (const auto& barrier : graph.GetCompiledBarriers())
+				seeded |= (barrier.From == rhi::TextureState::ShaderRead && barrier.To == rhi::TextureState::RenderTarget);
+			CHECK(seeded);
+		}
+	}
+
+	TEST_CASE("rendergraph: execute emits the compiled barriers in pass order")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+		rg::RGTexture scene = graph.CreateTexture({});
+
+		auto& scenePass = graph.AddPass("Scene");
+		scenePass.Write(scene, rhi::TextureState::RenderTarget);
+		scenePass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		auto& sample = graph.AddPass("Sample");
+		sample.Read(scene, rhi::TextureState::ShaderRead);
+		sample.Write(exported, rhi::TextureState::Present);
+		sample.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+
+		MockDevice device;
+		MockCommandList commandList;
+		graph.Execute(device, commandList);
+
+		// The RenderTarget -> ShaderRead edge must be emitted (alongside the
+		// first-use and export edges).
+		bool found = false;
+		for (const auto& barrier : commandList.Barriers)
+			found |= (barrier.first == rhi::TextureState::RenderTarget && barrier.second == rhi::TextureState::ShaderRead);
+		CHECK(found);
+	}
+
+	TEST_CASE("rendergraph: passes resolve their own resource handles")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture exported = graph.Import(ImportHandle(7), rhi::TextureState::Undefined);
+		rg::RGTexture scene = graph.CreateTexture({});
+
+		rhi::TextureHandle seenImported;
+		seenImported.Index = ~0u;
+
+		auto& scenePass = graph.AddPass("Scene");
+		scenePass.Write(scene, rhi::TextureState::RenderTarget);
+		scenePass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		auto& present = graph.AddPass("Present");
+		present.Read(scene, rhi::TextureState::ShaderRead);
+		present.Write(exported, rhi::TextureState::Present);
+		present.SetExecute([&](rhi::CommandList&, const rg::PassResources& resources)
+		{
+			seenImported = resources.GetTexture(exported);
+		});
+
+		graph.Compile();
+
+		MockDevice device;
+		MockCommandList commandList;
+		graph.Execute(device, commandList);
+
+		CHECK(seenImported.Index == 7);
+	}
+
+} // namespace rg_tests
+} // namespace TinyEngine
