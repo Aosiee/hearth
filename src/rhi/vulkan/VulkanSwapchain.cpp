@@ -398,9 +398,16 @@ namespace TinyEngine {
 		// P-A2: the frame slot's previous submission must have completed
 		// before its command pool/buffer is reused (the timeline replaces
 		// the old per-frame fence).
-		m_Device->WaitForTimelineValue(m_FrameLastValues[frameIndex]);
+		{
+			TE_PROFILE_SCOPE("Acquire: frame-slot timeline wait");
+			m_Device->WaitForTimelineValue(m_FrameLastValues[frameIndex]);
+		}
 
-		VkResult result = vkAcquireNextImageKHR(device, m_Swapchain, UINT64_MAX, m_ImageAvailableSemaphores[frameIndex], VK_NULL_HANDLE, &outImageIndex);
+		VkResult result;
+		{
+			TE_PROFILE_SCOPE("Acquire: vkAcquireNextImageKHR");
+			result = vkAcquireNextImageKHR(device, m_Swapchain, UINT64_MAX, m_ImageAvailableSemaphores[frameIndex], VK_NULL_HANDLE, &outImageIndex);
+		}
 
 		if (result == VK_ERROR_OUT_OF_DATE_KHR)
 		{
@@ -416,7 +423,10 @@ namespace TinyEngine {
 		// happen once the swapchain has more images than frames in flight), wait
 		// for it before writing over resources it might still be reading from.
 		if (m_ImagesInFlight[outImageIndex] != 0)
+		{
+			TE_PROFILE_SCOPE("Acquire: image-reuse timeline wait");
 			m_Device->WaitForTimelineValue(m_ImagesInFlight[outImageIndex]);
+		}
 
 		return true;
 	}

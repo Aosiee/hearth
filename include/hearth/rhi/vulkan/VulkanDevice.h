@@ -191,7 +191,12 @@ namespace TinyEngine {
 		// reasoning as the command pools: reusing slot N is only safe once
 		// frame N's fence has signalled, which BeginProfilingFrame's caller
 		// already guarantees.
-		static constexpr uint32_t kMaxTimestampsPerFrame = 64;
+		// One TOP+BOTTOM timestamp pair per GPU scope; the editor's UI alone
+		// can split into dozens of batches (every clip rect + pipeline change
+		// is its own scope since the Wisp per-batch labels landed), so this is
+		// generous rather than minimal. The per-frame query pools are sized
+		// from it and are cheap.
+		static constexpr uint32_t kMaxTimestampsPerFrame = 1024;
 
 		struct GpuScopeRecord
 		{
