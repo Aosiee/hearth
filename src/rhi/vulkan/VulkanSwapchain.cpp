@@ -399,6 +399,21 @@ namespace TinyEngine {
 		}
 	}
 
+	// T-F-C: the out-of-date rebuild sizes from the surface capabilities
+	// (the submit thread owns the surface - no GLFW calls off the main
+	// thread), falling back to the game-thread-published framebuffer size
+	// when the compositor reports an undefined currentExtent.
+	void VulkanSwapchain::RecreateFromSurfaceCapabilities()
+	{
+		VkSurfaceCapabilitiesKHR capabilities{};
+		VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_Device->GetPhysicalDevice(), m_Surface, &capabilities));
+
+		if (capabilities.currentExtent.width != 0xFFFFFFFFu && capabilities.currentExtent.width != 0)
+			Recreate(capabilities.currentExtent.width, capabilities.currentExtent.height);
+		else
+			Recreate(m_PublishedWidth.load(std::memory_order_relaxed), m_PublishedHeight.load(std::memory_order_relaxed));
+	}
+
 	void VulkanSwapchain::Recreate(uint32_t width, uint32_t height)
 	{
 		TE_PROFILE_FUNCTION();
@@ -406,14 +421,21 @@ namespace TinyEngine {
 		if (width == 0 || height == 0)
 			return;
 
-		vkDeviceWaitIdle(m_Device->GetDevice());
+		// T-F-C: the queue is externally synchronized - the lock guards
+		// only the device-wait itself: the rebuild below runs uploads
+		// (CreateDepthResources' one-time transition) that take the same
+		// mutex per-op, so holding it across the rebuild would self-deadlock.
+		{
+			std::lock_guard queueLock(m_Device->GetQueueMutex());
+			vkDeviceWaitIdle(m_Device->GetDevice());
+		}
 
 		DestroySwapchainResources();
 		CreateSwapchain(width, height);
 		CreateImageViews();
 	}
 
-	bool VulkanSwapchain::AcquireNextImage(uint32_t frameIndex, uint32_t& outImageIndex)
+	VulkanSwapchain::AcquireResult VulkanSwapchain::AcquireNextImage(uint32_t frameIndex, uint32_t& outImageIndex)
 	{
 		TE_PROFILE_FUNCTION();
 
@@ -427,18 +449,30 @@ namespace TinyEngine {
 			m_Device->WaitForTimelineValue(m_FrameLastValues[frameIndex]);
 		}
 
-		VkResult result;
+		// T-F-C: bounded wait - the acquire runs on the dedicated submit
+		// thread and must not wedge the shutdown join; the timeout lets a
+		// shutdown request break the loop.
+		VkResult result = VK_TIMEOUT;
+		while (result == VK_TIMEOUT || result == VK_NOT_READY)
 		{
-			TE_PROFILE_SCOPE("Acquire: vkAcquireNextImageKHR");
-			result = vkAcquireNextImageKHR(device, m_Swapchain, UINT64_MAX, m_ImageAvailableSemaphores[frameIndex], VK_NULL_HANDLE, &outImageIndex);
+			{
+				TE_PROFILE_SCOPE("Acquire: vkAcquireNextImageKHR");
+				result = vkAcquireNextImageKHR(device, m_Swapchain, kAcquireTimeoutNs, m_ImageAvailableSemaphores[frameIndex], VK_NULL_HANDLE, &outImageIndex);
+			}
+			if ((result == VK_TIMEOUT || result == VK_NOT_READY) && IsShutdownRequested())
+				return AcquireResult::ShuttingDown;
 		}
 
 		if (result == VK_ERROR_OUT_OF_DATE_KHR)
 		{
-			int width, height;
-			glfwGetFramebufferSize(m_Window, &width, &height);
-			Recreate((uint32_t)width, (uint32_t)height);
-			return false;
+			RecreateFromSurfaceCapabilities();
+			return AcquireResult::OutOfDate;
+		}
+
+		if (result == VK_ERROR_SURFACE_LOST_KHR)
+		{
+			TE_CORE_WARN(LogVulkan, "vkAcquireNextImageKHR lost the surface - skipping this frame.");
+			return AcquireResult::ShuttingDown;
 		}
 
 		TE_CORE_ASSERT(result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR, "vkAcquireNextImageKHR failed unexpectedly!");
@@ -452,7 +486,7 @@ namespace TinyEngine {
 			m_Device->WaitForTimelineValue(m_ImagesInFlight[outImageIndex]);
 		}
 
-		return true;
+		return AcquireResult::Success;
 	}
 
 	void VulkanSwapchain::SubmitAndPresent(uint32_t frameIndex, uint32_t imageIndex, VkCommandBuffer commandBuffer)
@@ -496,10 +530,18 @@ namespace TinyEngine {
 		VkSemaphore bothSignals[] = { signalSemaphores[0], timelineSemaphore };
 		submitInfo.pSignalSemaphores = bothSignals;
 
-		VK_CHECK(vkQueueSubmit(m_Device->GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
+		// T-F-C: the queue is externally synchronized - the frame submit
+		// and the game thread's upload submits serialize on it.
+		{
+			std::lock_guard queueLock(m_Device->GetQueueMutex());
+			VK_CHECK(vkQueueSubmit(m_Device->GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
+		}
 
 		// P-A3: once per frame after submit - free every resource whose
-		// retire stamp the GPU has now passed.
+		// retire stamp the GPU has now passed. Still on the frame-owner
+		// thread: T-F-C-A keeps the drain game-thread until the submit
+		// thread exists, at which point the game thread drains after the
+		// frame-complete wait.
 		GetVulkanRhiDevice().DrainRetireQueue();
 
 		m_ImagesInFlight[imageIndex] = timelineValue;
@@ -513,18 +555,16 @@ namespace TinyEngine {
 		presentInfo.pSwapchains = &m_Swapchain;
 		presentInfo.pImageIndices = &imageIndex;
 
-		VkResult result = vkQueuePresentKHR(m_Device->GetGraphicsQueue(), &presentInfo);
+		VkResult result;
+		{
+			std::lock_guard queueLock(m_Device->GetQueueMutex());
+			result = vkQueuePresentKHR(m_Device->GetGraphicsQueue(), &presentInfo);
+		}
 
 		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
-		{
-			int width, height;
-			glfwGetFramebufferSize(m_Window, &width, &height);
-			Recreate((uint32_t)width, (uint32_t)height);
-		}
+			RecreateFromSurfaceCapabilities();
 		else
-		{
 			VK_CHECK(result);
-		}
 	}
 
 }

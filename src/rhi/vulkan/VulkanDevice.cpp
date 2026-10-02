@@ -35,6 +35,9 @@ namespace TinyEngine {
 			else if (severity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
 				severityText = "WARN";
 
+			// T-F-C: the messenger fires on whichever thread made the call -
+			// the append serializes with the submit thread's frame writes.
+			std::lock_guard lock(GpuFrameDebugInfoMutex());
 			std::vector<std::string>& messages = GetMutableGpuFrameDebugInfo().ValidationMessages;
 			messages.insert(messages.begin(), std::string("[") + severityText + "] " + message);
 			if (messages.size() > kMaxBufferedValidationMessages)
@@ -572,11 +575,16 @@ namespace TinyEngine {
 		submitInfo.commandBufferCount = 1;
 		submitInfo.pCommandBuffers = &commandBuffer;
 
-		VK_CHECK(vkQueueSubmit(m_GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE));
-		// Simplest possible sync for a one-off upload: just wait for the whole
-		// queue to drain. Fine for occasional resource loads, see the header
-		// comment on why this isn't trying to be an async transfer system yet.
-		VK_CHECK(vkQueueWaitIdle(m_GraphicsQueue));
+		// T-F-C: the queue is externally synchronized - the game-thread
+		// uploads and the submit thread's frame submits serialize on it.
+		{
+			std::lock_guard lock(m_QueueMutex);
+			VK_CHECK(vkQueueSubmit(m_GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE));
+			// Simplest possible sync for a one-off upload: just wait for the whole
+			// queue to drain. Fine for occasional resource loads, see the header
+			// comment on why this isn't trying to be an async transfer system yet.
+			VK_CHECK(vkQueueWaitIdle(m_GraphicsQueue));
+		}
 
 		vkFreeCommandBuffers(m_Device, m_TransientCommandPool, 1, &commandBuffer);
 	}
@@ -671,6 +679,7 @@ namespace TinyEngine {
 	{
 		TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "BeginProfilingFrame frame index out of range!");
 		GpuFrameDebugInfo& debugInfo = GetMutableGpuFrameDebugInfo();
+		std::lock_guard lock(GpuFrameDebugInfoMutex());
 
 		uint32_t queryCount = m_NextQuerySlot[frameIndex].load(std::memory_order_relaxed);
 

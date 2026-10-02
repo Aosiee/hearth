@@ -4,6 +4,8 @@
 #include "Platform/Vulkan/VulkanDevice.h"
 #include "TinyEngine/RHI/RHI.h"
 
+#include <atomic>
+
 struct GLFWwindow;
 
 namespace TinyEngine {
@@ -27,6 +29,10 @@ namespace TinyEngine {
 		// actually changed, callers don't need to track that themselves.
 		void Recreate(uint32_t width, uint32_t height);
 
+		// T-F-C: the out-of-date rebuild path (submit thread) sizes from the
+		// surface capabilities, falling back to the published framebuffer size.
+		void RecreateFromSurfaceCapabilities();
+
 		// Rebuilds the swapchain (same as Recreate, at its current size) so
 		// ChoosePresentMode picks up the new preference immediately rather
 		// than waiting for some unrelated resize to happen to notice it.
@@ -36,10 +42,35 @@ namespace TinyEngine {
 		void SetVsync(bool enabled);
 
 		// Waits on the current frame's fence, then acquires the next swapchain
-		// image. Returns false if the swapchain came back out of date and had to
+		// image. OutOfDate means the swapchain came back out of date and had to
 		// be rebuilt, in which case the caller should skip drawing this frame
-		// rather than push a stale image through the pipeline.
-		bool AcquireNextImage(uint32_t frameIndex, uint32_t& outImageIndex);
+		// rather than push a stale image through the pipeline. ShuttingDown
+		// means the surface stopped handing out images after a shutdown
+		// request (T-F-C: the acquire runs on the dedicated submit thread and
+		// must not wedge the shutdown join).
+		enum class AcquireResult : uint8_t
+		{
+			Success,
+			OutOfDate,
+			ShuttingDown,
+		};
+		AcquireResult AcquireNextImage(uint32_t frameIndex, uint32_t& outImageIndex);
+
+		// T-F-C: the bounded acquire retries on this timeout so a shutdown
+		// request can break the loop (100ms).
+		static constexpr uint64_t kAcquireTimeoutNs = 100'000'000;
+
+		// T-F-C: the game thread publishes the window's framebuffer size
+		// every frame; the submit thread's out-of-date rebuilds size from
+		// the surface capabilities (falling back to this) instead of
+		// calling GLFW off the main thread.
+		void PublishFramebufferSize(uint32_t width, uint32_t height)
+		{
+			m_PublishedWidth.store(width, std::memory_order_relaxed);
+			m_PublishedHeight.store(height, std::memory_order_relaxed);
+		}
+		void RequestShutdown() { m_ShutdownRequested.store(true, std::memory_order_relaxed); }
+		bool IsShutdownRequested() const { return m_ShutdownRequested.load(std::memory_order_relaxed); }
 
 		// Submits an already recorded command buffer for the acquired image and
 		// presents it. Handles the out of date / suboptimal case by recreating
@@ -119,6 +150,12 @@ namespace TinyEngine {
 		// itself is what the Vulkan spec's own examples recommend to avoid a
 		// semaphore being waited on twice before it was ever signalled again.
 		std::vector<VkSemaphore> m_RenderFinishedSemaphores;
+
+		// T-F-C: the bounded-acquire shutdown handshake + the game-thread
+		// framebuffer-size publication (the submit thread never calls GLFW).
+		std::atomic<bool> m_ShutdownRequested{ false };
+		std::atomic<uint32_t> m_PublishedWidth{ 0 };
+		std::atomic<uint32_t> m_PublishedHeight{ 0 };
 
 		// The image-available binary semaphore is per frame in flight (the
 		// acquire/present handshake). The CPU-side reuse of a frame's command

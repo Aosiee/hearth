@@ -3,6 +3,7 @@
 #include "Platform/Vulkan/VulkanCommon.h"
 
 #include <atomic>
+#include <mutex>
 
 struct GLFWwindow;
 
@@ -56,6 +57,14 @@ namespace TinyEngine {
 		VkDevice GetDevice() const { return m_Device; }
 		VkQueue GetGraphicsQueue() const { return m_GraphicsQueue; }
 		uint32_t GetGraphicsQueueFamily() const { return m_GraphicsQueueFamily; }
+
+		// T-F-C: the queue is externally synchronized - once the frame's
+		// submit/present move to the dedicated submit thread, every
+		// queue-touching call on any thread (the game thread's
+		// EndSingleTimeCommands uploads, the submit thread's
+		// submit/present, the Recreate device-wait) holds this.
+		std::mutex& GetQueueMutex() { return m_QueueMutex; }
+
 		VmaAllocator GetAllocator() const { return m_Allocator; }
 
 		// The command pools are keyed by (frame slot, record thread); no
@@ -167,8 +176,8 @@ namespace TinyEngine {
 
 		VkPhysicalDevice m_PhysicalDevice = VK_NULL_HANDLE;
 		VkDevice m_Device = VK_NULL_HANDLE;
-
 		VkQueue m_GraphicsQueue = VK_NULL_HANDLE;
+		mutable std::mutex m_QueueMutex;
 		uint32_t m_GraphicsQueueFamily = 0;
 
 		VmaAllocator m_Allocator = VK_NULL_HANDLE;
