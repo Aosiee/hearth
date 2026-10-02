@@ -707,31 +707,4 @@ namespace TinyEngine {
 		vkCmdResetQueryPool(commandBuffer, m_TimestampPools[frameIndex], 0, kMaxTimestampsPerFrame);
 	}
 
-	namespace {
-
-		const char* VkImageLayoutToString(VkImageLayout layout)
-		{
-			switch (layout)
-			{
-				case VK_IMAGE_LAYOUT_UNDEFINED: return "UNDEFINED";
-				case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: return "COLOR_ATTACHMENT_OPTIMAL";
-				case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: return "SHADER_READ_ONLY_OPTIMAL";
-				case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: return "TRANSFER_SRC_OPTIMAL";
-				case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: return "TRANSFER_DST_OPTIMAL";
-				case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: return "PRESENT_SRC_KHR";
-				default: return "OTHER";
-			}
-		}
-
-	}
-
-	void VulkanDevice::RecordBarrierForDebug(const std::string& resourceName, VkImageLayout oldLayout, VkImageLayout newLayout) const
-	{
-		GpuBarrierRecord record;
-		record.ResourceName = resourceName;
-		record.OldLayout = VkImageLayoutToString(oldLayout);
-		record.NewLayout = VkImageLayoutToString(newLayout);
-		GetMutableGpuFrameDebugInfo().Barriers.push_back(record);
-	}
-
 }

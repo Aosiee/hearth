@@ -134,7 +134,7 @@ namespace TinyEngine {
 		// barrier list. Only called at the handful of always-present,
 		// per-frame barrier sites (swapchain clear, editor viewport target),
 		// not one-off resource upload barriers — see GpuFrameDebugData.h.
-		void RecordBarrierForDebug(const std::string& resourceName, VkImageLayout oldLayout, VkImageLayout newLayout) const;
+
 
 		// Used for one-off resource setup work that doesn't happen inside the
 		// normal per-frame recording, buffer/texture uploads mainly. Allocates

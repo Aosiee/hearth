@@ -52,6 +52,24 @@ namespace rhi {
 		Always,
 	};
 
+	// A display name for a texture state (the GPU frame debugger's barrier
+	// list uses the graph's vocabulary, not the backend's layout names).
+	inline const char* TextureStateName(TextureState state)
+	{
+		switch (state)
+		{
+		case TextureState::Undefined:    return "Undefined";
+		case TextureState::RenderTarget: return "RenderTarget";
+		case TextureState::DepthWrite:   return "DepthWrite";
+		case TextureState::DepthRead:    return "DepthRead";
+		case TextureState::ShaderRead:   return "ShaderRead";
+		case TextureState::TransferSrc:  return "TransferSrc";
+		case TextureState::TransferDst:  return "TransferDst";
+		case TextureState::Present:      return "Present";
+		}
+		return "Unknown";
+	}
+
 	// The small fixed sampler table a texture picks from at creation
 	// (the per-texture sampler choice).
 	enum class SamplerKind : uint8_t
