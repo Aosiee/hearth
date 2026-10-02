@@ -137,6 +137,10 @@ namespace rg {
 		struct CompiledBarrier
 		{
 			std::string PassName;
+			// The pass's position in the compiled order (NOT its name - the
+			// editor registers same-named passes per framebuffer target, so
+			// the name is not unique; RecordPass keys on this).
+			uint32_t OrderIndex = 0;
 			uint32_t TextureIndex = 0;
 			TextureState From = TextureState::Undefined;
 			TextureState To = TextureState::Undefined;

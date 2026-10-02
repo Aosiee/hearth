@@ -232,6 +232,7 @@ namespace rg {
 				{
 					CompiledBarrier barrier;
 					barrier.PassName = pass.Name;
+					barrier.OrderIndex = orderIndex;
 					barrier.TextureIndex = access.Texture.Index;
 					barrier.From = before;
 					barrier.To = access.State;
@@ -305,7 +306,7 @@ namespace rg {
 		textureBarriers.reserve(m_CompiledBarriers.size());
 		for (const CompiledBarrier& compiled : m_CompiledBarriers)
 		{
-			if (compiled.PassName != pass.Name)
+			if (compiled.OrderIndex != orderIndex)
 				continue;
 
 			textureBarriers.push_back({});
