@@ -45,6 +45,9 @@ namespace TinyEngine {
 		// presents it. Handles the out of date / suboptimal case by recreating
 		// the swapchain, in which case this frame is simply not shown.
 		void SubmitAndPresent(uint32_t frameIndex, uint32_t imageIndex, VkCommandBuffer commandBuffer);
+		// T-F-B.2: the per-pass command lists, submitted in order by ONE
+		// queue submission.
+		void SubmitAndPresent(uint32_t frameIndex, uint32_t imageIndex, const std::vector<VkCommandBuffer>& commandBuffers);
 
 		VkFormat GetImageFormat() const { return m_ImageFormat; }
 		VkExtent2D GetExtent() const { return m_Extent; }

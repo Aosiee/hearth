@@ -457,6 +457,11 @@ namespace TinyEngine {
 
 	void VulkanSwapchain::SubmitAndPresent(uint32_t frameIndex, uint32_t imageIndex, VkCommandBuffer commandBuffer)
 	{
+		SubmitAndPresent(frameIndex, imageIndex, std::vector<VkCommandBuffer>{ commandBuffer });
+	}
+
+	void VulkanSwapchain::SubmitAndPresent(uint32_t frameIndex, uint32_t imageIndex, const std::vector<VkCommandBuffer>& commandBuffers)
+	{
 		TE_PROFILE_FUNCTION();
 
 		VkSemaphore waitSemaphores[] = { m_ImageAvailableSemaphores[frameIndex] };
@@ -485,8 +490,8 @@ namespace TinyEngine {
 		submitInfo.waitSemaphoreCount = 1;
 		submitInfo.pWaitSemaphores = waitSemaphores;
 		submitInfo.pWaitDstStageMask = waitStages;
-		submitInfo.commandBufferCount = 1;
-		submitInfo.pCommandBuffers = &commandBuffer;
+		submitInfo.commandBufferCount = (uint32_t)commandBuffers.size();
+		submitInfo.pCommandBuffers = commandBuffers.empty() ? nullptr : commandBuffers.data();
 		submitInfo.signalSemaphoreCount = 2;
 		VkSemaphore bothSignals[] = { signalSemaphores[0], timelineSemaphore };
 		submitInfo.pSignalSemaphores = bothSignals;
