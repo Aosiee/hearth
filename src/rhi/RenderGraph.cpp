@@ -285,70 +285,73 @@ namespace rg {
 		return resources;
 	}
 
+	// The per-pass record: the pass's compiled barriers (the schedule
+	// derived at Compile - one Barrier call) + its ExecuteFn. The barrier
+	// set for the pass is its CompiledBarrier records (each one texture);
+	// they batch into one Barrier call exactly like Execute did. The
+	// transient handles resolve here via the pool - a HOST that fans the
+	// passes onto workers must pre-create the transients (or serialize the
+	// pool) before the fan-out (the prepare stage).
+	void RenderGraph::RecordPass(uint32_t orderIndex, Device& device, CommandList& commandList)
+	{
+		Pass& pass = m_Passes[m_Order[orderIndex]];
+
+		// The barrier descriptors point into the textureBarriers vector -
+		// the reserve prevents reallocation invalidating them mid-pass (the
+		// same contract the old Execute held).
+		std::vector<BarrierDesc> barriers;
+		std::vector<TextureBarrier> textureBarriers;
+		barriers.reserve(m_CompiledBarriers.size());
+		textureBarriers.reserve(m_CompiledBarriers.size());
+		for (const CompiledBarrier& compiled : m_CompiledBarriers)
+		{
+			if (compiled.PassName != pass.Name)
+				continue;
+
+			textureBarriers.push_back({});
+			TextureBarrier& textureBarrier = textureBarriers.back();
+			textureBarrier.Texture = m_Textures[compiled.TextureIndex].Imported
+				? m_Textures[compiled.TextureIndex].Handle
+				: m_Pool.GetOrCreate(device, compiled.TextureIndex, m_Textures[compiled.TextureIndex].Desc, "RenderGraph Transient");
+			textureBarrier.From = compiled.From;
+			textureBarrier.To = compiled.To;
+			textureBarrier.BaseMip = 0;
+			textureBarrier.MipCount = 1;
+			textureBarrier.BaseLayer = 0;
+			textureBarrier.LayerCount = 1;
+
+			BarrierDesc barrierDesc;
+			barrierDesc.Textures = &textureBarrier;
+			barrierDesc.TextureCount = 1;
+			barriers.push_back(barrierDesc);
+		}
+		if (!barriers.empty())
+			commandList.Barrier(barriers);
+
+		if (pass.ExecuteFn)
+		{
+			PassResources resources = ResolveResources(device, pass);
+			pass.ExecuteFn(commandList, resources);
+		}
+	}
+
 	void RenderGraph::Execute(Device& device, CommandList& commandList)
 	{
 		// The per-texture state machine, walked identically to Compile so
 		// the emitted edges match GetCompiledBarriers() exactly - including
 		// passes without a lambda (their declarations still move state).
-		std::vector<TextureState> state(m_Textures.size());
-		for (uint32_t i = 0; i < m_Textures.size(); i++)
-			state[i] = m_Textures[i].State;
-
-		// Scratch storage: the barrier descriptors point into these for the
-		// duration of the CommandList::Barrier call only. The reserve covers
-		// every barrier in the frame, so reallocation cannot occur mid-pass
-		// and the pointers stay stable.
-		std::vector<BarrierDesc> barriers;
-		std::vector<TextureBarrier> textureBarriers;
-		barriers.reserve(m_CompiledBarriers.size());
-		textureBarriers.reserve(m_CompiledBarriers.size());
-
-		for (uint32_t i : m_Order)
-		{
-			Pass& pass = m_Passes[i];
-
-			barriers.clear();
-			textureBarriers.clear();
-			for (const AccessRecord& access : pass.Accesses)
-			{
-				if (state[access.Texture.Index] == access.State)
-					continue;
-
-				textureBarriers.push_back({});
-				TextureBarrier& textureBarrier = textureBarriers.back();
-				textureBarrier.Texture = m_Textures[access.Texture.Index].Imported
-					? m_Textures[access.Texture.Index].Handle
-					: m_Pool.GetOrCreate(device, access.Texture.Index, m_Textures[access.Texture.Index].Desc, "RenderGraph Transient");
-				textureBarrier.From = state[access.Texture.Index];
-				textureBarrier.To = access.State;
-				textureBarrier.BaseMip = 0;
-				textureBarrier.MipCount = 1;
-				textureBarrier.BaseLayer = 0;
-				textureBarrier.LayerCount = 1;
-
-				BarrierDesc barrierDesc;
-				barrierDesc.Textures = &textureBarrier;
-				barrierDesc.TextureCount = 1;
-				barriers.push_back(barrierDesc);
-
-				state[access.Texture.Index] = access.State;
-			}
-			if (!barriers.empty())
-				commandList.Barrier(barriers);
-
-			if (pass.ExecuteFn)
-			{
-				PassResources resources = ResolveResources(device, pass);
-				pass.ExecuteFn(commandList, resources);
-			}
-		}
+		// T-F-B: the sequential Execute now drives the same per-pass
+		// RecordPass surface the threaded host will fan out - one code path
+		// for the barrier derivation.
+		for (uint32_t orderIndex = 0; orderIndex < m_Order.size(); orderIndex++)
+			RecordPass(orderIndex, device, commandList);
 
 		// Record the transients' final states so the next frame's graph
 		// seeds its derivation from where this frame left them.
 		for (uint32_t i = 0; i < m_Textures.size(); i++)
 		{
 			if (!m_Textures[i].Imported)
-				m_Pool.SetLastState(i, state[i]);
+				m_Pool.SetLastState(i, m_FinalStates[i]);
 		}
 	}
 

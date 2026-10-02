@@ -117,6 +117,18 @@ namespace rg {
 		// final states back into the pool.
 		void Execute(Device& device, CommandList& commandList);
 
+		// T-F-B: the per-pass record surface - the host fans RecordPass
+		// out to workers and submits the lists in the compiled order. Each
+		// pass re-issues its compiled barriers (the schedule derived at
+		// Compile) + its ExecuteFn into the given command list. RecordPass
+		// itself is single-threaded per call; the concurrency contract is
+		// on the host (and on the transient pool, which the prepare stage
+		// pre-creates - see RecordPass's comment).
+		void RecordPass(uint32_t orderIndex, Device& device, CommandList& commandList);
+
+		uint32_t GetCompiledPassCount() const { return (uint32_t)m_Order.size(); }
+		uint32_t CompiledPassIndex(uint32_t orderIndex) const { return m_Order[orderIndex]; }
+
 		// The compiled plan (the tests and GpuFrameDebugInfo read these).
 		struct CompiledPass
 		{
