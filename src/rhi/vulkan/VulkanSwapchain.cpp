@@ -117,22 +117,37 @@ namespace TinyEngine {
 		return VK_PRESENT_MODE_FIFO_KHR;
 	}
 
+	// T-F-C: the game thread (the r.vsync cvar observer) only records the
+	// request; the submit thread applies it at its next frame start - the
+	// swapchain rebuild must never run on the game thread while the submit
+	// thread owns acquire/present.
 	void VulkanSwapchain::SetVsync(bool enabled)
 	{
-		if (m_VsyncEnabled == enabled)
-			return;
+		m_PendingVsync.store(enabled ? 1u : 0u, std::memory_order_relaxed);
+	}
 
-		m_VsyncEnabled = enabled;
+	void VulkanSwapchain::ApplyPendingVsync()
+	{
+		uint32_t pending = m_PendingVsync.load(std::memory_order_relaxed);
+		if (pending > 1)
+			return; // no pending request
+		bool enabled = pending != 0;
 
 		// Present mode is only chosen at swapchain build time (CreateSwapchain,
 		// called from here), there's no way to change an already-built
 		// swapchain's mode in place - has to rebuild. A no-op if nothing has
-		// been created yet (m_RequestedWidth/Height still 0, e.g. this runs
-		// before Init() during window construction, see GenericWindow::Init);
-		// Init() picks up m_VsyncEnabled's current value on its own first
-		// build regardless.
-		if (m_RequestedWidth != 0 && m_RequestedHeight != 0)
-			Recreate(m_RequestedWidth, m_RequestedHeight);
+		// been created yet; Init() picks up m_VsyncEnabled's current value on
+		// its own first build regardless.
+		if (m_VsyncEnabled != enabled && m_RequestedWidth != 0 && m_RequestedHeight != 0)
+		{
+			m_VsyncEnabled = enabled;
+			RecreateFromSurfaceCapabilities();
+		}
+		else
+		{
+			m_VsyncEnabled = enabled;
+		}
+		m_PendingVsync.store(2u, std::memory_order_relaxed); // consumed
 	}
 
 	VkExtent2D VulkanSwapchain::ChooseExtent(const VkSurfaceCapabilitiesKHR& capabilities, uint32_t width, uint32_t height) const
@@ -537,13 +552,9 @@ namespace TinyEngine {
 			VK_CHECK(vkQueueSubmit(m_Device->GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
 		}
 
-		// P-A3: once per frame after submit - free every resource whose
-		// retire stamp the GPU has now passed. Still on the frame-owner
-		// thread: T-F-C-A keeps the drain game-thread until the submit
-		// thread exists, at which point the game thread drains after the
-		// frame-complete wait.
-		GetVulkanRhiDevice().DrainRetireQueue();
-
+		// P-A3 note: the retire drain now runs on the game thread after the
+		// frame-complete wait (VulkanContext:: SwapBuffers) - the retire
+		// queue + the VMA allocator never cross threads.
 		m_ImagesInFlight[imageIndex] = timelineValue;
 		m_FrameLastValues[frameIndex] = timelineValue;
 

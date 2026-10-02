@@ -69,6 +69,14 @@ namespace TinyEngine {
 			m_PublishedWidth.store(width, std::memory_order_relaxed);
 			m_PublishedHeight.store(height, std::memory_order_relaxed);
 		}
+		VkExtent2D GetPublishedFramebufferSize() const
+		{
+			return { m_PublishedWidth.load(std::memory_order_relaxed), m_PublishedHeight.load(std::memory_order_relaxed) };
+		}
+		// T-F-C: the submit thread applies a pending vsync change at its
+		// frame start (the swapchain rebuild must not run on the game
+		// thread once the submit thread owns acquire/present).
+		void ApplyPendingVsync();
 		void RequestShutdown() { m_ShutdownRequested.store(true, std::memory_order_relaxed); }
 		bool IsShutdownRequested() const { return m_ShutdownRequested.load(std::memory_order_relaxed); }
 
@@ -156,6 +164,8 @@ namespace TinyEngine {
 		std::atomic<bool> m_ShutdownRequested{ false };
 		std::atomic<uint32_t> m_PublishedWidth{ 0 };
 		std::atomic<uint32_t> m_PublishedHeight{ 0 };
+		// 0 = vsync off, 1 = vsync on, 2 = consumed (no pending request).
+		std::atomic<uint32_t> m_PendingVsync{ 2 };
 
 		// The image-available binary semaphore is per frame in flight (the
 		// acquire/present handshake). The CPU-side reuse of a frame's command
