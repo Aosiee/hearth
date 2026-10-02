@@ -625,7 +625,7 @@ namespace TinyEngine {
 
 		if (m_TimestampsSupported)
 		{
-			uint32_t frameIndex = GetVulkanCurrentFrameIndex();
+			uint32_t frameIndex = GetRecordFrameIndex();
 			TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "CmdBeginDebugLabel frame index out of range!");
 
 			// T-F-B.3: the slot counter is per frame + atomic (the parallel
@@ -647,7 +647,7 @@ namespace TinyEngine {
 	{
 		if (m_TimestampsSupported)
 		{
-			uint32_t frameIndex = GetVulkanCurrentFrameIndex();
+			uint32_t frameIndex = GetRecordFrameIndex();
 			TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "CmdEndDebugLabel frame index out of range!");
 
 			size_t threadKey = (size_t)frameIndex * m_RecordThreadCount + RecordThreadIndex();
