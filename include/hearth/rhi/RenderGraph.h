@@ -14,6 +14,7 @@
 
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace TinyEngine {
@@ -54,13 +55,24 @@ namespace rg {
 	// stable key (the graph's virtual index - built identically each frame),
 	// allocated lazily; each entry carries the state its last user left it
 	// in, so the next frame's barrier derivation seeds correctly. No
-	// aliasing in v1.
+	// aliasing. The key namespaces on the graph id so two graphs sharing one
+	// pool can never alias a virtual index.
 	class TransientTexturePool
 	{
 	public:
-		TextureHandle GetOrCreate(Device& device, uint32_t key, const TextureDesc& desc, const char* debugName);
-		TextureState GetLastState(uint32_t key) const;
-		void SetLastState(uint32_t key, TextureState state);
+		static uint64_t MakeKey(uint32_t graphId, uint32_t textureIndex)
+		{
+			return ((uint64_t)graphId << 32) | textureIndex;
+		}
+
+		// The prepare-stage creation (T-F-B.3): called on the record host's
+		// thread before the fan-out - never from a RecordPass.
+		TextureHandle GetOrCreate(Device& device, uint64_t key, const TextureDesc& desc, const char* debugName);
+		// The record-stage lookup: pure read, asserts the prepare stage
+		// created the entry (RecordPass must never create).
+		TextureHandle GetHandle(uint64_t key) const;
+		TextureState GetLastState(uint64_t key) const;
+		void SetLastState(uint64_t key, TextureState state);
 
 	private:
 		struct Entry
@@ -69,13 +81,13 @@ namespace rg {
 			TextureHandle Handle;
 			TextureState LastState = TextureState::Undefined;
 		};
-		std::vector<Entry> m_Entries; // indexed by key (sparse, grows on demand)
+		std::unordered_map<uint64_t, Entry> m_Entries;
 	};
 
 	class RenderGraph
 	{
 	public:
-		explicit RenderGraph(TransientTexturePool& pool);
+		explicit RenderGraph(TransientTexturePool& pool, uint32_t graphId = 0);
 		~RenderGraph() = default;
 		RenderGraph(const RenderGraph&) = delete;
 		RenderGraph& operator=(const RenderGraph&) = delete;
@@ -111,6 +123,16 @@ namespace rg {
 		// Orders the live passes, culls dead ones, and derives the barriers.
 		// The transient states seed from the pool's recorded last states.
 		void Compile();
+
+		// T-F-B.3: the prepare stage creates every transient texture up
+		// front (single-threaded, on the record host) so RecordPass is a
+		// pure read and can fan out to workers. Call after Compile.
+		void PreCreateTransients(Device& device);
+
+		// T-F-B.3: the single-threaded frame-end carry - the transients'
+		// final states feed the next frame's seeding. Execute calls it at
+		// its tail; the threaded host calls it after the fan-out.
+		void RecordFinalStates();
 
 		// Replays the compiled plan: barriers + each pass's lambda with its
 		// resolved resources. Compile must have run. Records the transients'
@@ -181,6 +203,7 @@ namespace rg {
 		PassResources ResolveResources(Device& device, const Pass& pass);
 
 		TransientTexturePool& m_Pool;
+		uint32_t m_GraphId = 0;
 		std::vector<Pass> m_Passes;
 		std::vector<VirtualTexture> m_Textures;
 		std::vector<std::unique_ptr<PassBuilder>> m_Builders;

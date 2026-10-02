@@ -10,13 +10,11 @@ namespace rg {
 
 	// ---- TransientTexturePool ----------------------------------------------------
 
-	TextureHandle TransientTexturePool::GetOrCreate(Device& device, uint32_t key, const TextureDesc& desc, const char* debugName)
+	TextureHandle TransientTexturePool::GetOrCreate(Device& device, uint64_t key, const TextureDesc& desc, const char* debugName)
 	{
-		if (key >= m_Entries.size())
-			m_Entries.resize(key + 1);
-
-		Entry& entry = m_Entries[key];
-		if (!IsValid(entry.Handle))
+		auto [it, inserted] = m_Entries.emplace(key, Entry{});
+		Entry& entry = it->second;
+		if (inserted || !IsValid(entry.Handle))
 		{
 			entry.Desc = desc;
 			entry.Handle = device.CreateTexture(desc, nullptr, 0, debugName);
@@ -24,23 +22,34 @@ namespace rg {
 		return entry.Handle;
 	}
 
-	TextureState TransientTexturePool::GetLastState(uint32_t key) const
+	TextureHandle TransientTexturePool::GetHandle(uint64_t key) const
 	{
-		if (key >= m_Entries.size() || !IsValid(m_Entries[key].Handle))
-			return TextureState::Undefined;
-		return m_Entries[key].LastState;
+		auto it = m_Entries.find(key);
+		TE_CORE_ASSERT(it != m_Entries.end() && IsValid(it->second.Handle),
+			"RecordPass resolved a transient that PreCreateTransients never created - the threaded host must pre-create transients before the fan-out!");
+		return it->second.Handle;
 	}
 
-	void TransientTexturePool::SetLastState(uint32_t key, TextureState state)
+	TextureState TransientTexturePool::GetLastState(uint64_t key) const
 	{
-		if (key < m_Entries.size())
-			m_Entries[key].LastState = state;
+		auto it = m_Entries.find(key);
+		if (it == m_Entries.end() || !IsValid(it->second.Handle))
+			return TextureState::Undefined;
+		return it->second.LastState;
+	}
+
+	void TransientTexturePool::SetLastState(uint64_t key, TextureState state)
+	{
+		auto it = m_Entries.find(key);
+		if (it != m_Entries.end())
+			it->second.LastState = state;
 	}
 
 	// ---- RenderGraph ------------------------------------------------------------
 
-	RenderGraph::RenderGraph(TransientTexturePool& pool)
+	RenderGraph::RenderGraph(TransientTexturePool& pool, uint32_t graphId)
 		: m_Pool(pool)
+		, m_GraphId(graphId)
 	{
 	}
 
@@ -60,7 +69,7 @@ namespace rg {
 		texture.Desc = desc;
 		// The physical texture may already exist from a previous frame; its
 		// carried state seeds the derivation at Compile time.
-		texture.State = m_Pool.GetLastState((uint32_t)m_Textures.size());
+		texture.State = m_Pool.GetLastState(TransientTexturePool::MakeKey(m_GraphId, (uint32_t)m_Textures.size()));
 		m_Textures.push_back(texture);
 		return { (uint32_t)m_Textures.size() - 1 };
 	}
@@ -257,8 +266,31 @@ namespace rg {
 		return m_Textures[texture.Index].State;
 	}
 
+	// T-F-B.3: the prepare-stage creation. Single-threaded by contract (the
+	// host calls it after Compile, before the fan-out).
+	void RenderGraph::PreCreateTransients(Device& device)
+	{
+		for (uint32_t i = 0; i < m_Textures.size(); i++)
+		{
+			if (!m_Textures[i].Imported)
+				m_Pool.GetOrCreate(device, TransientTexturePool::MakeKey(m_GraphId, i), m_Textures[i].Desc, "RenderGraph Transient");
+		}
+	}
+
+	// T-F-B.3: the single-threaded frame-end carry.
+	void RenderGraph::RecordFinalStates()
+	{
+		for (uint32_t i = 0; i < m_Textures.size(); i++)
+		{
+			if (!m_Textures[i].Imported)
+				m_Pool.SetLastState(TransientTexturePool::MakeKey(m_GraphId, i), m_FinalStates[i]);
+		}
+	}
+
 	PassResources RenderGraph::ResolveResources(Device& device, const Pass& pass)
 	{
+		(void)device; // T-F-B.3: resolution is a pure pool lookup now; the
+					  // parameter stays for the host-facing RecordPass surface.
 		PassResources resources;
 		for (const AccessRecord& access : pass.Accesses)
 		{
@@ -280,7 +312,7 @@ namespace rg {
 			if (m_Textures[access.Texture.Index].Imported)
 				ref.Handle = m_Textures[access.Texture.Index].Handle;
 			else
-				ref.Handle = m_Pool.GetOrCreate(device, access.Texture.Index, m_Textures[access.Texture.Index].Desc, "RenderGraph Transient");
+				ref.Handle = m_Pool.GetHandle(TransientTexturePool::MakeKey(m_GraphId, access.Texture.Index));
 			resources.Textures.push_back(ref);
 		}
 		return resources;
@@ -290,9 +322,9 @@ namespace rg {
 	// derived at Compile - one Barrier call) + its ExecuteFn. The barrier
 	// set for the pass is its CompiledBarrier records (each one texture);
 	// they batch into one Barrier call exactly like Execute did. The
-	// transient handles resolve here via the pool - a HOST that fans the
-	// passes onto workers must pre-create the transients (or serialize the
-	// pool) before the fan-out (the prepare stage).
+	// transient handles resolve here via the pool's PURE LOOKUP - a HOST
+	// that fans the passes onto workers must pre-create the transients via
+	// PreCreateTransients (the prepare stage) before the fan-out.
 	void RenderGraph::RecordPass(uint32_t orderIndex, Device& device, CommandList& commandList)
 	{
 		Pass& pass = m_Passes[m_Order[orderIndex]];
@@ -313,7 +345,7 @@ namespace rg {
 			TextureBarrier& textureBarrier = textureBarriers.back();
 			textureBarrier.Texture = m_Textures[compiled.TextureIndex].Imported
 				? m_Textures[compiled.TextureIndex].Handle
-				: m_Pool.GetOrCreate(device, compiled.TextureIndex, m_Textures[compiled.TextureIndex].Desc, "RenderGraph Transient");
+				: m_Pool.GetHandle(TransientTexturePool::MakeKey(m_GraphId, compiled.TextureIndex));
 			textureBarrier.From = compiled.From;
 			textureBarrier.To = compiled.To;
 			textureBarrier.BaseMip = 0;
@@ -341,19 +373,19 @@ namespace rg {
 		// The per-texture state machine, walked identically to Compile so
 		// the emitted edges match GetCompiledBarriers() exactly - including
 		// passes without a lambda (their declarations still move state).
-		// T-F-B: the sequential Execute now drives the same per-pass
-		// RecordPass surface the threaded host will fan out - one code path
-		// for the barrier derivation.
+		// T-F-B: the sequential Execute drives the same per-pass RecordPass
+		// surface the threaded host fans out - one code path for the
+		// barrier derivation. It pre-creates its transients up front (the
+		// sequential path is single-threaded either way) and carries the
+		// final states at its tail, exactly like the threaded host.
+		PreCreateTransients(device);
+
 		for (uint32_t orderIndex = 0; orderIndex < m_Order.size(); orderIndex++)
 			RecordPass(orderIndex, device, commandList);
 
 		// Record the transients' final states so the next frame's graph
 		// seeds its derivation from where this frame left them.
-		for (uint32_t i = 0; i < m_Textures.size(); i++)
-		{
-			if (!m_Textures[i].Imported)
-				m_Pool.SetLastState(i, m_FinalStates[i]);
-		}
+		RecordFinalStates();
 	}
 
 } // namespace rg

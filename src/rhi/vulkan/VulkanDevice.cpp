@@ -4,6 +4,8 @@
 #include "TinyEngine/Debug/GpuFrameDebugData.h"
 #include "TinyEngine/Debug/Profiler.h"
 
+#include "loom.h"
+
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cstring>
@@ -452,11 +454,16 @@ namespace TinyEngine {
 
 	void VulkanDevice::CreateCommandPools()
 	{
-		// Pools are keyed by (frame slot, record thread). v1 records on
-		// thread 0; the thread count is fixed at Init (more recording
-		// threads can be added without moving pools again).
-		m_RecordThreadCount = std::min(MaxRecordThreads,
-			std::max(1u, std::thread::hardware_concurrency() == 0 ? 1u : (uint32_t)std::thread::hardware_concurrency()));
+		// P-A2: pools are keyed by (frame slot, record thread). T-F-B.3: the
+		// count covers the main thread + every Loom pool worker 1:1 (loom
+		// assigns 0 to the main thread and 1..workerCount to the workers;
+		// the clamped RecordThreadIndex is the defensive fallback for any
+		// helping thread beyond the range - none exist in the tree today,
+		// and lanes never steal).
+		uint32_t hardwareThreads = std::thread::hardware_concurrency() == 0
+			? 1u
+			: (uint32_t)std::thread::hardware_concurrency();
+		m_RecordThreadCount = std::min(MaxRecordThreads * 4u, std::max(MaxRecordThreads, hardwareThreads));
 		m_CommandPools.resize(TotalFrameSlots * m_RecordThreadCount, VK_NULL_HANDLE);
 
 		VkCommandPoolCreateInfo poolCreateInfo{};
@@ -492,10 +499,16 @@ namespace TinyEngine {
 	void VulkanDevice::CreateTimestampQueryPools()
 	{
 		m_TimestampPools.resize(TotalFrameSlots, VK_NULL_HANDLE);
-		m_NextQuerySlot.resize(TotalFrameSlots, 0);
-		m_ScopeBeginStack.resize(TotalFrameSlots);
-		m_ScopeNameStack.resize(TotalFrameSlots);
-		m_RecordedScopes.resize(TotalFrameSlots);
+		// T-F-B.3: the counters are per frame slot (atomic - the parallel
+		// record workers allocate slots concurrently; the fetch_add keeps
+		// the used prefix contiguous so the readback stays one range); the
+		// scope stacks + recorded scopes are per (frame slot, record thread).
+		m_NextQuerySlot = std::make_unique<std::atomic<uint32_t>[]>(TotalFrameSlots);
+		for (uint32_t i = 0; i < TotalFrameSlots; i++)
+			m_NextQuerySlot[i].store(0, std::memory_order_relaxed);
+		m_ScopeBeginStack.resize((size_t)TotalFrameSlots * m_RecordThreadCount);
+		m_ScopeNameStack.resize((size_t)TotalFrameSlots * m_RecordThreadCount);
+		m_RecordedScopes.resize((size_t)TotalFrameSlots * m_RecordThreadCount);
 
 		if (!m_TimestampsSupported)
 		{
@@ -606,12 +619,19 @@ namespace TinyEngine {
 		{
 			uint32_t frameIndex = GetVulkanCurrentFrameIndex();
 			TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "CmdBeginDebugLabel frame index out of range!");
-			TE_CORE_ASSERT(m_NextQuerySlot[frameIndex] < kMaxTimestampsPerFrame, "GPU frame debugger ran out of timestamp query slots this frame, raise VulkanDevice::kMaxTimestampsPerFrame!");
 
-			uint32_t slot = m_NextQuerySlot[frameIndex]++;
+			// T-F-B.3: the slot counter is per frame + atomic (the parallel
+			// record workers allocate concurrently); fetch_add keeps the used
+			// prefix contiguous for the single-range readback.
+			uint32_t slot = m_NextQuerySlot[frameIndex].fetch_add(1, std::memory_order_relaxed);
+			TE_CORE_ASSERT(slot < kMaxTimestampsPerFrame, "GPU frame debugger ran out of timestamp query slots this frame, raise VulkanDevice::kMaxTimestampsPerFrame!");
 			vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, m_TimestampPools[frameIndex], slot);
-			m_ScopeBeginStack[frameIndex].push_back(slot);
-			m_ScopeNameStack[frameIndex].push_back(name);
+
+			// The begin/end pairing is always recorded by one worker, so the
+			// scope stacks are per (frame, record thread).
+			size_t threadKey = (size_t)frameIndex * m_RecordThreadCount + RecordThreadIndex();
+			m_ScopeBeginStack[threadKey].push_back(slot);
+			m_ScopeNameStack[threadKey].push_back(name);
 		}
 	}
 
@@ -622,23 +642,24 @@ namespace TinyEngine {
 			uint32_t frameIndex = GetVulkanCurrentFrameIndex();
 			TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "CmdEndDebugLabel frame index out of range!");
 
+			size_t threadKey = (size_t)frameIndex * m_RecordThreadCount + RecordThreadIndex();
+
 			// Begin/EndDebugLabel calls are always properly paired at every
 			// call site in this codebase, but guard anyway rather than pop an
 			// empty stack if that's ever not true.
-			if (!m_ScopeBeginStack[frameIndex].empty())
+			if (!m_ScopeBeginStack[threadKey].empty())
 			{
-				TE_CORE_ASSERT(m_NextQuerySlot[frameIndex] < kMaxTimestampsPerFrame, "GPU frame debugger ran out of timestamp query slots this frame, raise VulkanDevice::kMaxTimestampsPerFrame!");
-
-				uint32_t endSlot = m_NextQuerySlot[frameIndex]++;
+				uint32_t endSlot = m_NextQuerySlot[frameIndex].fetch_add(1, std::memory_order_relaxed);
+				TE_CORE_ASSERT(endSlot < kMaxTimestampsPerFrame, "GPU frame debugger ran out of timestamp query slots this frame, raise VulkanDevice::kMaxTimestampsPerFrame!");
 				vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, m_TimestampPools[frameIndex], endSlot);
 
-				uint32_t beginSlot = m_ScopeBeginStack[frameIndex].back();
-				m_ScopeBeginStack[frameIndex].pop_back();
-				std::string scopeName = m_ScopeNameStack[frameIndex].back();
-				m_ScopeNameStack[frameIndex].pop_back();
+				uint32_t beginSlot = m_ScopeBeginStack[threadKey].back();
+				m_ScopeBeginStack[threadKey].pop_back();
+				std::string scopeName = m_ScopeNameStack[threadKey].back();
+				m_ScopeNameStack[threadKey].pop_back();
 
 				uint32_t profilerFrame = TinyEngine::Profiler::Get().CurrentFrameIndex();
-				m_RecordedScopes[frameIndex].push_back({ scopeName, beginSlot, endSlot, profilerFrame });
+				m_RecordedScopes[threadKey].push_back({ scopeName, beginSlot, endSlot, profilerFrame });
 			}
 		}
 
@@ -651,16 +672,18 @@ namespace TinyEngine {
 		TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "BeginProfilingFrame frame index out of range!");
 		GpuFrameDebugInfo& debugInfo = GetMutableGpuFrameDebugInfo();
 
-		if (isMainWindow && m_TimestampsSupported && !m_RecordedScopes[frameIndex].empty())
+		uint32_t queryCount = m_NextQuerySlot[frameIndex].load(std::memory_order_relaxed);
+
+		if (isMainWindow && m_TimestampsSupported && queryCount > 0)
 		{
-			uint32_t queryCount = m_NextQuerySlot[frameIndex];
 			std::vector<uint64_t> timestamps(queryCount);
 
 			// These queries are guaranteed complete: the caller only reaches
 			// here after waiting on this exact frame-in-flight slot's fence
 			// (VulkanSwapchain::AcquireNextImage), which can't have signalled
 			// until all of this slot's previous GPU work, timestamp writes
-			// included, finished.
+			// included, finished. The atomic fetch_add allocation keeps the
+			// used slots a contiguous [0, queryCount) prefix.
 			VkResult result = vkGetQueryPoolResults(m_Device, m_TimestampPools[frameIndex], 0, queryCount,
 				timestamps.size() * sizeof(uint64_t), timestamps.data(), sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
 
@@ -668,19 +691,24 @@ namespace TinyEngine {
 			{
 				debugInfo.PassTimings.clear();
 				// The profiler's GPU lane: the tick pairs + the
-				// originating frame, in the device-ns domain (the
-				// viewer anchors on the frame; the tooltip converts via
-				// the period).
-				for (const GpuScopeRecord& scope : m_RecordedScopes[frameIndex])
+				// originating frame, in the device-ns domain (the viewer
+				// anchors on the frame; the tooltip converts via the
+				// period). T-F-B.3: the scopes merge per-thread
+				// (thread-major, then recording order) - still fully
+				// deterministic.
+				for (uint32_t thread = 0; thread < m_RecordThreadCount; thread++)
 				{
-					uint64_t deltaTicks = timestamps[scope.EndQuery] - timestamps[scope.BeginQuery];
-					float ms = (float)((double)deltaTicks * m_TimestampPeriodNs / 1000000.0);
-					debugInfo.PassTimings.push_back({ scope.Name, ms });
+					for (const GpuScopeRecord& scope : m_RecordedScopes[(size_t)frameIndex * m_RecordThreadCount + thread])
+					{
+						uint64_t deltaTicks = timestamps[scope.EndQuery] - timestamps[scope.BeginQuery];
+						float ms = (float)((double)deltaTicks * m_TimestampPeriodNs / 1000000.0);
+						debugInfo.PassTimings.push_back({ scope.Name, ms });
 
-					TinyEngine::Profiler::Get().GpuPassPair(0,
-						(uint64_t)((double)timestamps[scope.BeginQuery] * m_TimestampPeriodNs),
-						(uint64_t)((double)timestamps[scope.EndQuery] * m_TimestampPeriodNs),
-						scope.ProfilerFrameIndex, scope.Name.c_str());
+						TinyEngine::Profiler::Get().GpuPassPair(0,
+							(uint64_t)((double)timestamps[scope.BeginQuery] * m_TimestampPeriodNs),
+							(uint64_t)((double)timestamps[scope.EndQuery] * m_TimestampPeriodNs),
+							scope.ProfilerFrameIndex, scope.Name.c_str());
+					}
 				}
 
 				debugInfo.Available = true;
@@ -693,10 +721,22 @@ namespace TinyEngine {
 			debugInfo.Barriers.clear();
 		}
 
-		m_NextQuerySlot[frameIndex] = 0;
-		m_RecordedScopes[frameIndex].clear();
-		m_ScopeBeginStack[frameIndex].clear();
-		m_ScopeNameStack[frameIndex].clear();
+		m_NextQuerySlot[frameIndex].store(0, std::memory_order_relaxed);
+		for (uint32_t thread = 0; thread < m_RecordThreadCount; thread++)
+		{
+			size_t threadKey = (size_t)frameIndex * m_RecordThreadCount + thread;
+			m_RecordedScopes[threadKey].clear();
+			m_ScopeBeginStack[threadKey].clear();
+			m_ScopeNameStack[threadKey].clear();
+		}
+	}
+
+	uint32_t VulkanDevice::RecordThreadIndex() const
+	{
+		int index = loom::CurrentThreadIndex();
+		if (index < 0)
+			index = 0;
+		return (uint32_t)index < m_RecordThreadCount ? (uint32_t)index : m_RecordThreadCount - 1;
 	}
 
 	void VulkanDevice::CmdResetTimestampPool(VkCommandBuffer commandBuffer, uint32_t frameIndex)

@@ -6,8 +6,12 @@
 
 #include "TinyEngine/RenderGraph/RenderGraph.h"
 
+#include "loom.h"
+
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <atomic>
 #include <string>
 
 namespace TinyEngine {
@@ -501,6 +505,92 @@ namespace rg_tests {
 
 		REQUIRE(graph.GetCompiledPasses().size() == 1);
 		CHECK(NameAt(graph, 0) == "SelfReadWrite");
+	}
+
+	TEST_CASE("rendergraph: RecordPass fans out onto workers over pre-created transients")
+	{
+		// The concurrent record contract - the prepare stage pre-creates the
+		// transients, then RecordPass fans out to loom workers with one mock
+		// list per pass, and the final-state carry runs single-threaded
+		// afterwards. Runs under TSAN in the tinytest dev-tsan config.
+		loom::Shutdown();
+		loom::Init();
+
+		rg::TransientTexturePool pool;
+		MockDevice device;
+
+		std::atomic<int> executed{ 0 };
+
+		rg::RenderGraph graph(pool);
+		rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+		rg::RGTexture scene = graph.CreateTexture({});
+		rg::RGTexture view = graph.CreateTexture({});
+
+		auto& scenePass = graph.AddPass("Scene");
+		scenePass.Write(scene, rhi::TextureState::RenderTarget);
+		scenePass.SetExecute([&](rhi::CommandList&, const rg::PassResources&) { executed++; });
+
+		auto& viewPass = graph.AddPass("View");
+		viewPass.Read(scene, rhi::TextureState::ShaderRead);
+		viewPass.Write(view, rhi::TextureState::RenderTarget);
+		viewPass.SetExecute([&](rhi::CommandList&, const rg::PassResources&) { executed++; });
+
+		auto& blend = graph.AddPass("Blend");
+		blend.Read(view, rhi::TextureState::ShaderRead);
+		blend.Write(exported, rhi::TextureState::Present);
+		blend.SetExecute([&](rhi::CommandList&, const rg::PassResources&) { executed++; });
+
+		graph.Compile();
+
+		// The prepare stage creates every transient up front, single-threaded.
+		graph.PreCreateTransients(device);
+		CHECK(device.TextureCreates == 2);
+
+		// One list per pass; the workers write disjoint slots.
+		std::vector<MockCommandList> lists(graph.GetCompiledPassCount());
+		loom::ParallelFor(0, (size_t)graph.GetCompiledPassCount(), 1,
+			[&](size_t begin, size_t end)
+			{
+				for (size_t i = begin; i < end; i++)
+					graph.RecordPass((uint32_t)i, device, lists[i]);
+			});
+
+		// The single-threaded frame-end carry.
+		graph.RecordFinalStates();
+
+		CHECK(executed.load() == 3);
+
+		// The fan-out emitted exactly the compiled barrier edges (each pass
+		// re-issued its own) - the same multiset the sequential Execute
+		// would have produced.
+		std::vector<std::pair<rhi::TextureState, rhi::TextureState>> emitted;
+		for (const MockCommandList& list : lists)
+			emitted.insert(emitted.end(), list.Barriers.begin(), list.Barriers.end());
+		CHECK(emitted.size() == graph.GetCompiledBarriers().size());
+		for (const rg::RenderGraph::CompiledBarrier& barrier : graph.GetCompiledBarriers())
+		{
+			auto it = std::find(emitted.begin(), emitted.end(),
+				std::make_pair(barrier.From, barrier.To));
+			CHECK(it != emitted.end());
+			if (it != emitted.end())
+				emitted.erase(it);
+		}
+		CHECK(emitted.empty());
+
+		// A second graph sharing the pool under its own graph id never
+		// aliases the first graph's virtual indices.
+		{
+			rg::RenderGraph other(pool, /*graphId*/ 1);
+			rg::RGTexture ownScene = other.CreateTexture({});
+			auto& ownPass = other.AddPass("Own Scene");
+			ownPass.Write(ownScene, rhi::TextureState::RenderTarget);
+			ownPass.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+			other.Compile();
+			other.PreCreateTransients(device);
+			CHECK(device.TextureCreates == 3); // a fresh texture, not the graph-0 one
+		}
+
+		loom::Shutdown();
 	}
 
 } // namespace rg_tests

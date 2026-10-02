@@ -212,10 +212,22 @@ namespace TinyEngine {
 	public:
 		float GetTimestampPeriodNs() const { return m_TimestampPeriodNs; }
 		uint32_t GetMaxPushConstantsSize() const { return m_MaxPushConstantsSize; }
+		uint32_t GetRecordThreadCount() const { return m_RecordThreadCount; }
 	private:
 
+		// T-F-B.3: the calling thread's record index, clamped into
+		// [0, m_RecordThreadCount). The pool workers are configured 1:1
+		// with the pool slots (LoomPool), so this maps uniquely; helping
+		// threads outside the range share the clamp defensively.
+		uint32_t RecordThreadIndex() const;
+
 		std::vector<VkQueryPool> m_TimestampPools;
-		std::vector<uint32_t> m_NextQuerySlot;
+		// Per-frame slot counters (atomic: the parallel record workers
+		// allocate timestamp slots concurrently; the slots stay contiguous
+		// so the readback reads one prefix).
+		std::unique_ptr<std::atomic<uint32_t>[]> m_NextQuerySlot;
+		// Per-(frame slot, record thread): the scope begin/end pairing is
+		// always recorded by one worker, so the stacks are per-thread.
 		std::vector<std::vector<uint32_t>> m_ScopeBeginStack;
 		std::vector<std::vector<std::string>> m_ScopeNameStack;
 		std::vector<std::vector<GpuScopeRecord>> m_RecordedScopes;
