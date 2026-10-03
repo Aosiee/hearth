@@ -158,6 +158,28 @@ namespace TinyEngine {
 		VkCommandBuffer BeginSingleTimeCommands() const;
 		void EndSingleTimeCommands(VkCommandBuffer commandBuffer) const;
 
+		// The upload batch. While a batch is active on the CALLING
+		// thread, BeginSingleTimeCommands returns the batch's command
+		// buffer and EndSingleTimeCommands is a no-op - every upload
+		// records into one buffer.
+		// EndUploadBatch ends + submits it once on the graphics queue
+		// WITHOUT a device waitIdle (the queue's submission order + the
+		// frame's acquire timeline wait order it before the frame that
+		// samples the uploads). The batch state is thread-local, so the
+		// game-thread promotion never shares it with the submit thread's
+		// own single-time-commands use (the swapchain creation path).
+		// A batch with no recorded commands submits nothing.
+		void BeginUploadBatch();
+		void EndUploadBatch();
+
+		// While a batch is active on the calling thread, upload helpers
+		// hand their transient staging buffers here instead of destroying
+		// them: the batch's recorded copies still reference them, and they
+		// die only once the GPU has passed the batch's submission (the
+		// timeline). Returns false when no batch is active - the caller
+		// destroys the staging itself, exactly as before.
+		bool BatchRetireStaging(VkBuffer buffer, VmaAllocation allocation);
+
 	private:
 		void CreateInstance(GLFWwindow* windowForExtensionQuery);
 		void CreateDebugMessenger();

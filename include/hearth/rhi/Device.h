@@ -119,6 +119,16 @@ namespace rhi {
 
 		virtual QueueHandle GetQueue(QueueKind kind) = 0;
 
+		// The upload batch. Uploads recorded between Begin and
+		// End (the single-time-commands staging paths every loader uses)
+		// are gathered into ONE submission at End - submitted without a
+		// device waitIdle, so the frame that samples them is ordered after
+		// them by the queue itself (the one-graphics-timeline invariant).
+		// Game-thread-only (the promotion runs at the frame boundary);
+		// End is a no-op submit if nothing recorded.
+		virtual void BeginUploadBatch() = 0;
+		virtual void EndUploadBatch() = 0;
+
 		// v1: submits through the existing binary-semaphore/fence frame path;
 		// timeline waits/signals become meaningful in P-A2.
 		virtual uint64_t Submit(QueueHandle queue, std::span<const CommandListHandle> commandLists,

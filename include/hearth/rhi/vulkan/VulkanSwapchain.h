@@ -118,6 +118,13 @@ namespace TinyEngine {
 		void CreateSyncObjects();
 		void CreateDepthResources();
 		void DestroySwapchainResources();
+		// F1: the depth transition's own command pool - the device-wide
+		// transient pool is game-thread-only (uploads + the asset batch),
+		// while this runs on the SUBMIT thread during a resize; a
+		// per-swapchain pool removes the cross-thread pool sharing
+		// entirely.
+		void CreateTransitionCommandPool();
+		void DestroyTransitionCommandPool();
 
 		VkSurfaceFormatKHR ChooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& available) const;
 		VkPresentModeKHR ChoosePresentMode(const std::vector<VkPresentModeKHR>& available) const;
@@ -139,6 +146,7 @@ namespace TinyEngine {
 		VkImage m_DepthImage = VK_NULL_HANDLE;
 		VmaAllocation m_DepthAllocation = VK_NULL_HANDLE;
 		VkImageView m_DepthImageView = VK_NULL_HANDLE;
+		VkCommandPool m_TransitionCommandPool = VK_NULL_HANDLE;
 
 		// What ChoosePresentMode should prefer next time it runs - read by
 		// CreateSwapchain, not just SetVsync, so the very first swapchain

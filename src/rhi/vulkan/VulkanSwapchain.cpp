@@ -16,11 +16,35 @@ namespace TinyEngine {
 
 		CreateSurface(window);
 
+		// F1: the per-swapchain transition pool (created on the game thread
+		// during Init, before the submit thread exists; used only by the
+		// submit thread's depth-transition during a resize).
+		CreateTransitionCommandPool();
+
 		int width, height;
 		glfwGetFramebufferSize(window, &width, &height);
 		CreateSwapchain((uint32_t)width, (uint32_t)height);
 		CreateImageViews();
 		CreateSyncObjects();
+	}
+
+	void VulkanSwapchain::CreateTransitionCommandPool()
+	{
+		VkCommandPoolCreateInfo poolCreateInfo{};
+		poolCreateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+		poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+		poolCreateInfo.queueFamilyIndex = m_Device->GetGraphicsQueueFamily();
+		VK_CHECK(vkCreateCommandPool(m_Device->GetDevice(), &poolCreateInfo, nullptr, &m_TransitionCommandPool));
+		m_Device->SetObjectName(VK_OBJECT_TYPE_COMMAND_POOL, (uint64_t)m_TransitionCommandPool, "Swapchain Transition Command Pool");
+	}
+
+	void VulkanSwapchain::DestroyTransitionCommandPool()
+	{
+		if (m_TransitionCommandPool != VK_NULL_HANDLE)
+		{
+			vkDestroyCommandPool(m_Device->GetDevice(), m_TransitionCommandPool, nullptr);
+			m_TransitionCommandPool = VK_NULL_HANDLE;
+		}
 	}
 
 	VulkanSwapchain::~VulkanSwapchain()
@@ -36,8 +60,15 @@ namespace TinyEngine {
 			return; // idempotent: the destructor runs this after an explicit Shutdown
 
 		VkDevice device = m_Device->GetDevice();
-		vkDeviceWaitIdle(device);
+		// F2: the device-wait touches every queue - scope it under the queue
+		// mutex (other windows' submit threads may be live; the lock covers
+		// ONLY the wait, never a re-entrant upload).
+		{
+			std::lock_guard queueLock(m_Device->GetQueueMutex());
+			vkDeviceWaitIdle(device);
+		}
 
+		DestroyTransitionCommandPool();
 		DestroySwapchainResources();
 
 		for (VkSemaphore& semaphore : m_ImageAvailableSemaphores)
@@ -273,8 +304,21 @@ namespace TinyEngine {
 		// This image is never read anywhere else (no sampling, no present), and
 		// it's cleared in full every frame, so once it's in this layout there's
 		// never a reason to leave it - see VulkanSwapchain.h's GetDepthImageView
-		// comment.
-		VkCommandBuffer commandBuffer = m_Device->BeginSingleTimeCommands();
+		// comment. F1: this runs on the SUBMIT thread during a resize, so it
+		// uses the swapchain's OWN transient pool, never the device-wide one
+		// the game thread's uploads share.
+		VkCommandBufferAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandPool = m_TransitionCommandPool;
+		allocInfo.commandBufferCount = 1;
+		VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+		VK_CHECK(vkAllocateCommandBuffers(m_Device->GetDevice(), &allocInfo, &commandBuffer));
+
+		VkCommandBufferBeginInfo beginInfo{};
+		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
 
 		VkImageMemoryBarrier2 toDepthAttachment{};
 		toDepthAttachment.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -295,7 +339,23 @@ namespace TinyEngine {
 		toDepthAttachmentDependency.pImageMemoryBarriers = &toDepthAttachment;
 		vkCmdPipelineBarrier2(commandBuffer, &toDepthAttachmentDependency);
 
-		m_Device->EndSingleTimeCommands(commandBuffer);
+		VK_CHECK(vkEndCommandBuffer(commandBuffer));
+
+		VkSubmitInfo submitInfo{};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &commandBuffer;
+
+		// Scoped queue lock (submit + waitIdle) - the transition must land
+		// before the image is used, and this runs on the submit thread while
+		// other windows' frames submit on the same queue.
+		{
+			std::lock_guard queueLock(m_Device->GetQueueMutex());
+			VK_CHECK(vkQueueSubmit(m_Device->GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
+			VK_CHECK(vkQueueWaitIdle(m_Device->GetGraphicsQueue()));
+		}
+
+		vkFreeCommandBuffers(m_Device->GetDevice(), m_TransitionCommandPool, 1, &commandBuffer);
 	}
 
 	void VulkanSwapchain::CreateImageViews()
@@ -517,15 +577,11 @@ namespace TinyEngine {
 		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
 		VkSemaphore signalSemaphores[] = { m_RenderFinishedSemaphores[imageIndex] };
 
-		// P-A2: the submission also signals the graphics-queue timeline at a
-		// fresh value; that value is what paces this frame slot's reuse and
-		// the image's in-flight tracking (the fences are gone).
-		uint64_t timelineValue = m_Device->AllocateTimelineValue();
-
 		// One signal value per signalled semaphore; the binary render-finished
 		// entry is ignored (binary semaphores have no value), the timeline one
 		// carries the fresh value (VUID-VkSubmitInfo-pNext-03241).
-		uint64_t signalValues[] = { 0, timelineValue };
+		uint64_t timelineValue = 0;
+		uint64_t signalValues[] = { 0, 0 };
 
 		VkTimelineSemaphoreSubmitInfo timelineSubmit{};
 		timelineSubmit.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
@@ -546,9 +602,16 @@ namespace TinyEngine {
 		submitInfo.pSignalSemaphores = bothSignals;
 
 		// T-F-C: the queue is externally synchronized - the frame submit
-		// and the game thread's upload submits serialize on it.
+		// and the game thread's upload submits serialize on it. The timeline
+		// VALUE is allocated INSIDE the same lock as the submit: with
+		// multiple windows (or the asset upload batch) allocating values
+		// concurrently, an out-of-order execution of two submissions would
+		// otherwise signal a value <= the current one
+		// (VUID-VkSubmitInfo-pSignalSemaphores-03242).
 		{
 			std::lock_guard queueLock(m_Device->GetQueueMutex());
+			timelineValue = m_Device->AllocateTimelineValue();
+			signalValues[1] = timelineValue;
 			VK_CHECK(vkQueueSubmit(m_Device->GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
 		}
 

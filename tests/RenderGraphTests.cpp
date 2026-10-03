@@ -74,6 +74,8 @@ namespace rg_tests {
 		rhi::CommandList* AdoptCommandBuffer(void*) override { return nullptr; }
 
 		rhi::QueueHandle GetQueue(rhi::QueueKind) override { return {}; }
+		void BeginUploadBatch() override {}
+		void EndUploadBatch() override {}
 		uint64_t Submit(rhi::QueueHandle, std::span<const rhi::CommandListHandle>,
 			std::span<const rhi::TimelineWait>, std::span<const rhi::TimelineSignal>) override { return 0; }
 		void WaitIdle() override {}
@@ -361,7 +363,7 @@ namespace rg_tests {
 
 		MockDevice device;
 		MockCommandList commandList;
-		graph.Execute(device, commandList);
+		graph.Execute(device, commandList, 0u);
 
 		// Two live virtuals with the same desc: two physical textures.
 		CHECK(device.TextureCreates == 2);
@@ -389,7 +391,7 @@ namespace rg_tests {
 			sample.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
 
 			graph.Compile();
-			graph.Execute(device, commandList);
+			graph.Execute(device, commandList, 0u);
 		}
 
 		// Round two: the same virtual index resolves to the same physical
@@ -411,7 +413,7 @@ namespace rg_tests {
 			sample.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
 
 			graph.Compile();
-			graph.Execute(device, commandList);
+			graph.Execute(device, commandList, 0u);
 
 			// No new allocation for the scene transient in round two.
 			CHECK(device.TextureCreates == 1);
@@ -443,7 +445,7 @@ namespace rg_tests {
 
 		MockDevice device;
 		MockCommandList commandList;
-		graph.Execute(device, commandList);
+		graph.Execute(device, commandList, 0u);
 
 		// The RenderTarget -> ShaderRead edge must be emitted (alongside the
 		// first-use and export edges).
@@ -479,7 +481,7 @@ namespace rg_tests {
 
 		MockDevice device;
 		MockCommandList commandList;
-		graph.Execute(device, commandList);
+		graph.Execute(device, commandList, 0u);
 
 		CHECK(seenImported.Index == 7);
 	}
@@ -552,7 +554,7 @@ namespace rg_tests {
 			[&](size_t begin, size_t end)
 			{
 				for (size_t i = begin; i < end; i++)
-					graph.RecordPass((uint32_t)i, device, lists[i]);
+					graph.RecordPass((uint32_t)i, device, lists[i], 0u);
 			});
 
 		// The single-threaded frame-end carry.
@@ -593,5 +595,105 @@ namespace rg_tests {
 		loom::Shutdown();
 	}
 
+	// M-A: the record-context contract - the graph scopes each pass with
+	// the host-wired enter/leave hooks (the backend's thread-local frame
+	// index) and carries the slot in PassResources::FrameSlot, so
+	// record-side readers always resolve THIS job's slot. The tests
+	// simulate the backend shim with their own thread-local - the graph
+	// itself stays backend-neutral.
+	namespace {
+		thread_local uint32_t t_RecordContext = ~0u;
+		uint32_t TestEnterRecordContext(uint32_t slot) { uint32_t prev = t_RecordContext; t_RecordContext = slot; return prev; }
+		void TestLeaveRecordContext(uint32_t prev) { t_RecordContext = prev; }
+	}
+
+	TEST_CASE("rendergraph: RecordPass scopes the record context and PassResources carries the slot")
+	{
+		rg::TransientTexturePool pool;
+		MockDevice device;
+		MockCommandList list;
+
+		rg::RenderGraph graph(pool);
+		graph.SetRecordContextHooks(&TestEnterRecordContext, &TestLeaveRecordContext);
+		rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+		auto& pass = graph.AddPass("Scoped");
+		pass.Write(exported, rhi::TextureState::Present);
+		pass.SetExecute([](rhi::CommandList&, const rg::PassResources& resources) {
+			CHECK(resources.FrameSlot == 7u);
+			CHECK(t_RecordContext == 7u);
+		});
+		graph.Compile();
+
+		t_RecordContext = ~0u;
+		graph.RecordPass(0, device, list, 7u);
+		CHECK(t_RecordContext == ~0u); // restored by the scope's exit
+	}
+
+	TEST_CASE("rendergraph: an interleaved record job restores the outer context (help-while-waiting)")
+	{
+		// Loom's help-while-waiting can run a SECOND record job on the same
+		// worker while a pass waits on a counter; the per-pass scope must
+		// restore the outer job's context when the nested job exits.
+		loom::Shutdown();
+		loom::Init();
+
+		{ // the counters die inside this scope, before the pool shuts down
+			rg::TransientTexturePool pool;
+			MockDevice device;
+			std::vector<MockCommandList> lists(2);
+
+			rg::RenderGraph graph(pool);
+			graph.SetRecordContextHooks(&TestEnterRecordContext, &TestLeaveRecordContext);
+			rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+
+			std::atomic<uint32_t> ctxBefore{ 0 }, ctxNested{ 0 }, ctxAfter{ 0 };
+			loom::ScopedCounter nestedDone(1);
+
+			auto& outerPass = graph.AddPass("Outer"); // recorded at slot 3
+			outerPass.Write(exported, rhi::TextureState::Present);
+			outerPass.SetExecute([&](rhi::CommandList&, const rg::PassResources& resources) {
+				ctxBefore = t_RecordContext;
+				CHECK(resources.FrameSlot == 3u);
+				// While this worker waits, it helps the pool: the nested job
+				// (slot 5) runs here, scoped and restored by its own guard.
+				// The nested task signals AFTER its RecordPass returns, so
+				// the wait ends only once the nested scope has exited and
+				// restored.
+				loom::WaitFor(nestedDone.Get());
+				ctxAfter = t_RecordContext;
+			});
+
+			auto& nestedPass = graph.AddPass("Nested"); // recorded at slot 5
+			nestedPass.Write(exported, rhi::TextureState::Present);
+			nestedPass.SetExecute([&](rhi::CommandList&, const rg::PassResources& resources) {
+				ctxNested = t_RecordContext;
+				CHECK(resources.FrameSlot == 5u);
+			});
+
+			graph.Compile();
+			graph.PreCreateTransients(device);
+
+			t_RecordContext = ~0u;
+			loom::ScopedCounter outerDone(1);
+			loom::Submit([&]() {
+				graph.RecordPass(0, device, lists[0], 3u);
+				loom::Signal(outerDone.Get());
+			});
+			loom::Submit([&]() {
+				graph.RecordPass(1, device, lists[1], 5u);
+				loom::Signal(nestedDone.Get());
+			});
+			loom::WaitFor(outerDone.Get());
+
+			CHECK(ctxBefore.load() == 3u);
+			CHECK(ctxNested.load() == 5u);
+			CHECK(ctxAfter.load() == 3u); // the nested job's scope restored the outer context
+			CHECK(t_RecordContext == ~0u);
+		}
+
+		loom::Shutdown();
+	}
+
 } // namespace rg_tests
 } // namespace TinyEngine
+

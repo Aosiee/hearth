@@ -21,6 +21,18 @@ namespace TinyEngine {
 		void Init(VulkanDevice& device, VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible, const std::string& debugName);
 		void Shutdown();
 
+		// Clears the ownership fields WITHOUT destroying - for buffers
+		// handed to the RHI's retire queue (the mesh vertex/index
+		// destruction path), so nothing double-frees them.
+		void Detach()
+		{
+			m_Buffer = VK_NULL_HANDLE;
+			m_Allocation = VK_NULL_HANDLE;
+			m_MappedData = nullptr;
+			m_External = false;
+			m_Device = nullptr;
+		}
+
 		// P-C: a borrowed entry - the buffer (and its allocation) belong to
 		// someone else (an engine Mesh's VulkanVertexBuffer/VulkanIndexBuffer);
 		// Shutdown then only clears the borrow, never destroys.

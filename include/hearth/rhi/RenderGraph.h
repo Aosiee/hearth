@@ -40,6 +40,13 @@ namespace rg {
 		};
 		std::vector<TextureRef> Textures;
 
+		// M-A: the frame slot this pass is recorded for - the graph-owned
+		// record context. New record code should read THIS instead of the
+		// legacy record-index global (see SetRecordContextHooks); the
+		// thread-local index is a compatibility shim until every reader
+		// migrates.
+		uint32_t FrameSlot = 0;
+
 		TextureHandle GetTexture(RGTexture virtualTexture) const
 		{
 			for (const TextureRef& ref : Textures)
@@ -136,17 +143,34 @@ namespace rg {
 
 		// Replays the compiled plan: barriers + each pass's lambda with its
 		// resolved resources. Compile must have run. Records the transients'
-		// final states back into the pool.
-		void Execute(Device& device, CommandList& commandList);
+		// final states back into the pool. `frameSlot` is the record context
+		// every pass is scoped with (see SetRecordContextHooks).
+		void Execute(Device& device, CommandList& commandList, uint32_t frameSlot);
 
-		// T-F-B: the per-pass record surface - the host fans RecordPass
-		// out to workers and submits the lists in the compiled order. Each
-		// pass re-issues its compiled barriers (the schedule derived at
-		// Compile) + its ExecuteFn into the given command list. RecordPass
-		// itself is single-threaded per call; the concurrency contract is
-		// on the host (and on the transient pool, which the prepare stage
-		// pre-creates - see RecordPass's comment).
-		void RecordPass(uint32_t orderIndex, Device& device, CommandList& commandList);
+		// T-F-B: the per-pass record surface - the
+		// host fans RecordPass out to workers and submits the lists in the
+		// compiled order. Each pass re-issues its compiled barriers (the
+		// schedule derived at Compile) + its ExecuteFn into the given
+		// command list. RecordPass itself is single-threaded per call; the
+		// concurrency contract is on the host (and on the transient pool,
+		// which the prepare stage pre-creates - see RecordPass's comment).
+		// `frameSlot` scopes the record context for this pass (M-A).
+		void RecordPass(uint32_t orderIndex, Device& device, CommandList& commandList, uint32_t frameSlot);
+
+		// M-A: the backend's record-context hooks - RecordPass scopes each
+		// pass with Enter(frameSlot) ... Leave(previous) around the pass's
+		// record subtree, so every record-side reader (the legacy thread-local
+		// frame index, labels, replays, staging picks) resolves THIS job's
+		// slot. The graph stays backend-neutral: the host wires these to the
+		// backend's index mechanism; null hooks = no scoping (headless graph
+		// tests).
+		using RecordContextEnter = uint32_t (*)(uint32_t slot);
+		using RecordContextLeave = void (*)(uint32_t previous);
+		void SetRecordContextHooks(RecordContextEnter enter, RecordContextLeave leave)
+		{
+			m_RecordContextEnter = enter;
+			m_RecordContextLeave = leave;
+		}
 
 		uint32_t GetCompiledPassCount() const { return (uint32_t)m_Order.size(); }
 		uint32_t CompiledPassIndex(uint32_t orderIndex) const { return m_Order[orderIndex]; }
@@ -204,6 +228,8 @@ namespace rg {
 
 		TransientTexturePool& m_Pool;
 		uint32_t m_GraphId = 0;
+		RecordContextEnter m_RecordContextEnter = nullptr;
+		RecordContextLeave m_RecordContextLeave = nullptr;
 		std::vector<Pass> m_Passes;
 		std::vector<VirtualTexture> m_Textures;
 		std::vector<std::unique_ptr<PassBuilder>> m_Builders;

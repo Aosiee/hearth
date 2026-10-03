@@ -1164,16 +1164,6 @@ namespace rhi {
 		uint64_t signalValue = 0;
 		for (const TimelineSignal& signal : signals)
 			signalValue = std::max(signalValue, signal.Value);
-		if (signalValue == 0)
-			signalValue = m_Vulkan.AllocateTimelineValue();
-		else
-		{
-			// An explicit signal must outrun every wait in this submit (the
-			// same semaphore is both waited and signalled) and keep the
-			// device's allocator monotonic for later submits.
-			TE_CORE_ASSERT(signalValue > waitValue, "a submit must signal past every timeline value it waits on");
-			m_Vulkan.AdvanceTimelineValue(signalValue);
-		}
 
 		VkTimelineSemaphoreSubmitInfo timelineInfo{};
 		timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
@@ -1198,15 +1188,37 @@ namespace rhi {
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = &timelineSemaphore;
 
-		VulkanCheckResult(vkQueueSubmit(m_Vulkan.GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE),
-			"vkQueueSubmit", __FILE__, __LINE__);
+		// The value allocation + the vkQueueSubmit share one critical
+		// section on the queue mutex: concurrent allocators (two windows'
+		// frame submits, the asset upload batch) must execute in allocation
+		// order (VUID-VkSubmitInfo-pSignalSemaphores-03242).
+		{
+			std::lock_guard queueLock(m_Vulkan.GetQueueMutex());
+			if (signalValue == 0)
+				signalValue = m_Vulkan.AllocateTimelineValue();
+			else
+			{
+				// An explicit signal must outrun every wait in this submit
+				// (the same semaphore is both waited and signalled) and
+				// keep the device's allocator monotonic for later submits.
+				TE_CORE_ASSERT(signalValue > waitValue, "a submit must signal past every timeline value it waits on");
+				m_Vulkan.AdvanceTimelineValue(signalValue);
+			}
+			VulkanCheckResult(vkQueueSubmit(m_Vulkan.GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE),
+				"vkQueueSubmit", __FILE__, __LINE__);
+		}
 		return signalValue;
 	}
 
 	void VulkanRhiDevice::WaitIdle()
 	{
 		if (m_Initialized)
+		{
+			// F2: scope the device-wait under the queue mutex (live submit
+			// threads on the same queue - the wait covers ONLY this).
+			std::lock_guard queueLock(m_Vulkan.GetQueueMutex());
 			vkDeviceWaitIdle(m_Vulkan.GetDevice());
+		}
 	}
 
 	SwapchainHandle VulkanRhiDevice::CreateSwapchain(void* window)

@@ -162,6 +162,11 @@ namespace rhi {
 		// recycled by a drain (the self-test's assertions).
 		bool IsBindlessIndexLive(uint32_t index) const;
 
+		// Dev/test accessor: the retire queue's current depth (the S-C
+		// buffer-retire self-test asserts the mesh destruction path queues
+		// instead of destroying synchronously).
+		size_t GetRetireQueueSize() const { return m_RetireQueue.size(); }
+
 		// ---- Device -------------------------------------------------------
 		BufferHandle CreateBuffer(const BufferDesc& desc, const char* debugName) override;
 		void DestroyBuffer(BufferHandle handle) override;
@@ -197,6 +202,11 @@ namespace rhi {
 		CommandList* AdoptCommandBuffer(void* commandBuffer) override;
 
 		QueueHandle GetQueue(QueueKind kind) override;
+
+		// The upload batch delegates to the VulkanDevice (see its own
+		// comment - thread-local state, one submit without waitIdle).
+		void BeginUploadBatch() override { m_Vulkan.BeginUploadBatch(); }
+		void EndUploadBatch() override { m_Vulkan.EndUploadBatch(); }
 
 		uint64_t Submit(QueueHandle queue, std::span<const CommandListHandle> commandLists,
 			std::span<const TimelineWait> waits, std::span<const TimelineSignal> signals) override;

@@ -15,6 +15,22 @@ namespace TinyEngine {
 
 	namespace {
 
+		// The calling thread's active upload batch (the game-thread
+		// promotion opens one per frame; the submit thread's
+		// single-time-commands use never shares it - thread-local state,
+		// no cross-thread race). While a buffer is held, every
+		// Begin/EndSingleTimeCommands pair records into it instead of
+		// allocating its own. Submitted buffers + their retired staging
+		// are reclaimed once the timeline passes the batch's signal.
+		thread_local struct
+		{
+			VkCommandBuffer Buffer = VK_NULL_HANDLE;
+			bool Dirty = false;
+			std::vector<VkCommandBuffer> SubmittedBuffers;
+			uint64_t SubmittedValue = 0;
+			std::vector<std::pair<VkBuffer, VmaAllocation>> PendingStaging;
+		} s_UploadBatch;
+
 		// The only validation layer used. If it isn't present on this machine
 		// (no Vulkan SDK / LunarG layers installed), startup carries on
 		// without it rather than refusing to start, the same way the engine
@@ -53,19 +69,23 @@ namespace TinyEngine {
 			(void)type;
 			(void)userData;
 
+			// F6: log the VUID id alongside the message - the pMessage-only
+			// log dropped the VUID name, which let THREADING ERRORs (no VUID
+			// token in pMessage) escape the log-grep gates entirely.
+			const char* messageId = callbackData->pMessageIdName ? callbackData->pMessageIdName : "<no-id>";
 			switch (severity)
 			{
 				case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
-					TE_CORE_ERROR(LogVulkan, "{0}", callbackData->pMessage);
+					TE_CORE_ERROR(LogVulkan, "{0} [{1}]", callbackData->pMessage, messageId);
 					break;
 				case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT:
-					TE_CORE_WARN(LogVulkan, "{0}", callbackData->pMessage);
+					TE_CORE_WARN(LogVulkan, "{0} [{1}]", callbackData->pMessage, messageId);
 					break;
 				case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT:
-					TE_CORE_INFO(LogVulkan, "{0}", callbackData->pMessage);
+					TE_CORE_INFO(LogVulkan, "{0} [{1}]", callbackData->pMessage, messageId);
 					break;
 				default:
-					TE_CORE_DEBUG(LogVulkan, "{0}", callbackData->pMessage);
+					TE_CORE_DEBUG(LogVulkan, "{0} [{1}]", callbackData->pMessage, messageId);
 					break;
 			}
 
@@ -156,6 +176,16 @@ namespace TinyEngine {
 
 		if (m_Device != VK_NULL_HANDLE)
 			vkDeviceWaitIdle(m_Device);
+
+		// The device is idle - reclaim any uploaded-batch buffers +
+		// retired staging before their pool/allocator die.
+		for (auto& [buffer, allocation] : s_UploadBatch.PendingStaging)
+			vmaDestroyBuffer(m_Allocator, buffer, allocation);
+		s_UploadBatch.PendingStaging.clear();
+		for (VkCommandBuffer buffer : s_UploadBatch.SubmittedBuffers)
+			vkFreeCommandBuffers(m_Device, m_TransientCommandPool, 1, &buffer);
+		s_UploadBatch.SubmittedBuffers.clear();
+		s_UploadBatch.SubmittedValue = 0;
 
 		for (VkQueryPool pool : m_TimestampPools)
 		{
@@ -549,6 +579,14 @@ namespace TinyEngine {
 
 	VkCommandBuffer VulkanDevice::BeginSingleTimeCommands() const
 	{
+		// Inside an active upload batch every upload records into the
+		// batch's one buffer (the batch owns begin/end/submit).
+		if (s_UploadBatch.Buffer != VK_NULL_HANDLE)
+		{
+			s_UploadBatch.Dirty = true;
+			return s_UploadBatch.Buffer;
+		}
+
 		VkCommandBufferAllocateInfo allocInfo{};
 		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -568,6 +606,13 @@ namespace TinyEngine {
 
 	void VulkanDevice::EndSingleTimeCommands(VkCommandBuffer commandBuffer) const
 	{
+		// The batch owns the end + submit for its own buffer.
+		if (s_UploadBatch.Buffer != VK_NULL_HANDLE)
+		{
+			TE_CORE_ASSERT(commandBuffer == s_UploadBatch.Buffer, "an upload outside the batch ended inside it");
+			return;
+		}
+
 		VK_CHECK(vkEndCommandBuffer(commandBuffer));
 
 		VkSubmitInfo submitInfo{};
@@ -587,6 +632,104 @@ namespace TinyEngine {
 		}
 
 		vkFreeCommandBuffers(m_Device, m_TransientCommandPool, 1, &commandBuffer);
+	}
+
+	void VulkanDevice::BeginUploadBatch()
+	{
+		TE_CORE_ASSERT(s_UploadBatch.Buffer == VK_NULL_HANDLE, "an upload batch is already active on this thread");
+
+		// Reclaim the previous batch's submitted buffers + retired staging
+		// once the GPU has passed its submission (conservative: everything
+		// is freed at the LATEST submitted value).
+		if (s_UploadBatch.SubmittedValue != 0 && GetCompletedTimelineValue() >= s_UploadBatch.SubmittedValue)
+		{
+			for (auto& [buffer, allocation] : s_UploadBatch.PendingStaging)
+				vmaDestroyBuffer(m_Allocator, buffer, allocation);
+			s_UploadBatch.PendingStaging.clear();
+			for (VkCommandBuffer buffer : s_UploadBatch.SubmittedBuffers)
+				vkFreeCommandBuffers(m_Device, m_TransientCommandPool, 1, &buffer);
+			s_UploadBatch.SubmittedBuffers.clear();
+			s_UploadBatch.SubmittedValue = 0;
+		}
+
+		VkCommandBufferAllocateInfo allocInfo{};
+		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		allocInfo.commandPool = m_TransientCommandPool;
+		allocInfo.commandBufferCount = 1;
+
+		VK_CHECK(vkAllocateCommandBuffers(m_Device, &allocInfo, &s_UploadBatch.Buffer));
+
+		VkCommandBufferBeginInfo beginInfo{};
+		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		VK_CHECK(vkBeginCommandBuffer(s_UploadBatch.Buffer, &beginInfo));
+		s_UploadBatch.Dirty = false;
+	}
+
+	void VulkanDevice::EndUploadBatch()
+	{
+		VkCommandBuffer commandBuffer = s_UploadBatch.Buffer;
+		if (commandBuffer == VK_NULL_HANDLE)
+			return; // no batch active on this thread
+
+		// A batch with nothing recorded submits nothing (a recording-state
+		// free is legal).
+		if (!s_UploadBatch.Dirty)
+		{
+			s_UploadBatch.Buffer = VK_NULL_HANDLE;
+			vkFreeCommandBuffers(m_Device, m_TransientCommandPool, 1, &commandBuffer);
+			return;
+		}
+
+		VK_CHECK(vkEndCommandBuffer(commandBuffer));
+
+		// The batch signals the graphics timeline at a fresh value: its
+		// command buffer + retired staging are reclaimed once the GPU
+		// passes it (BeginUploadBatch's drain), which also makes the
+		// retire-queue stamps stay conservative (the batch consumes the
+		// "next submit value" just like a frame submit would).
+		// The value is allocated INSIDE the queue lock alongside the
+		// submit (see VulkanSwapchain::SubmitAndPresent) - concurrent
+		// allocators (two windows' frame submits) must not execute out of
+		// allocation order (VUID-VkSubmitInfo-pSignalSemaphores-03242).
+		uint64_t signalValue = 0;
+
+		VkTimelineSemaphoreSubmitInfo timelineInfo{};
+		timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+		timelineInfo.signalSemaphoreValueCount = 1;
+		timelineInfo.pSignalSemaphoreValues = &signalValue;
+
+		VkSubmitInfo submitInfo{};
+		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &commandBuffer;
+		submitInfo.pNext = &timelineInfo;
+		submitInfo.signalSemaphoreCount = 1;
+		submitInfo.pSignalSemaphores = &m_TimelineSemaphore;
+
+		// No waitIdle: the batch submits and moves on. Queue submission order
+		// plus the frame's acquire timeline wait keep the frame that samples
+		// these uploads ordered after them (the one-graphics-timeline
+		// invariant).
+		{
+			std::lock_guard lock(m_QueueMutex);
+			signalValue = AllocateTimelineValue();
+			VK_CHECK(vkQueueSubmit(m_GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE));
+		}
+
+		s_UploadBatch.SubmittedBuffers.push_back(commandBuffer);
+		s_UploadBatch.SubmittedValue = signalValue;
+		s_UploadBatch.Buffer = VK_NULL_HANDLE;
+		s_UploadBatch.Dirty = false;
+	}
+
+	bool VulkanDevice::BatchRetireStaging(VkBuffer buffer, VmaAllocation allocation)
+	{
+		if (s_UploadBatch.Buffer == VK_NULL_HANDLE)
+			return false;
+		s_UploadBatch.PendingStaging.emplace_back(buffer, allocation);
+		return true;
 	}
 
 	void VulkanDevice::SetObjectName(VkObjectType type, uint64_t handle, const std::string& name) const
