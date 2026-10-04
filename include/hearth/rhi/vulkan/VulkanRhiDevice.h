@@ -17,6 +17,7 @@
 #include "Platform/Vulkan/VulkanSwapchain.h"
 
 #include <memory>
+#include <mutex>
 #include <vector>
 
 struct GLFWwindow;
@@ -134,18 +135,26 @@ namespace rhi {
 		VulkanDevice* GetVulkan() { return &m_Vulkan; }
 
 		// ---- P-A3: the global bindless set + the retire queue ----------
-		// One UPDATE_AFTER_BIND set per device; every texture gets a
-		// stable BindlessIndex written into it at creation. Destroyed
-		// resources are deferred through the retire queue until the
-		// graphics timeline passes the submit that could reference them.
+		// P-F: ONE UPDATE_AFTER_BIND set PER FRAME SLOT (TotalFrameSlots
+		// identical copies - a slot's set is only touched when that slot's
+		// previous submission has retired, so rewrites are legal). Every
+		// descriptor write goes through a monotonic write log and is
+		// applied to a slot's set as a single batch when that slot begins
+		// recording; a texture's BindlessIndex is written once at creation
+		// and recycled through the retire queue only after its tombstone
+		// write has been applied to EVERY slot's set.
 		static constexpr uint32_t kBindlessTextures = 16384;
 		static constexpr uint32_t kBindlessBuffers = 4096;
 
-		VkDescriptorSet GetGlobalDescriptorSet() const { return m_GlobalSet; }
+		VkDescriptorSet GetGlobalDescriptorSet(uint32_t slot) const { return m_GlobalSets[slot]; }
 		VkDescriptorSetLayout GetGlobalSetLayout() const { return m_GlobalSetLayout; }
 
 		uint32_t AllocateBindlessTextureIndex();
 		void WriteTextureDescriptor(uint32_t index, VkImageView imageView, VkSampler sampler, VkImageLayout layout);
+		// P-F: applies every logged write with Seq > this slot's last
+		// applied seq to the slot's set in one vkUpdateDescriptorSets batch
+		// (idempotent; called from VulkanCommandList::BindGlobalSet).
+		void ApplyDescriptorLog(uint32_t slot);
 		void QueueTextureForDestruction(VkImage image, VmaAllocation allocation,
 			VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex);
 		void QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation);
@@ -159,8 +168,14 @@ namespace rhi {
 		void DrainRetireQueueUnconditional();
 
 		// Dev/test accessor: true while the index is handed out and not yet
-		// recycled by a drain (the self-test's assertions).
+		// recycled by a drain (the self-test's assertions). An index
+		// awaiting its tombstone's application is NOT live.
 		bool IsBindlessIndexLive(uint32_t index) const;
+
+		// Dev/test accessor: true once the index is back in the free list
+		// - i.e. the timeline passed AND every slot applied its tombstone
+		// (what the self-test asserts).
+		bool IsBindlessIndexRecycled(uint32_t index) const;
 
 		// Dev/test accessor: the retire queue's current depth (the S-C
 		// buffer-retire self-test asserts the mesh destruction path queues
@@ -236,6 +251,36 @@ namespace rhi {
 		void CreateGlobalBindlessSet();
 		void DestroyGlobalBindlessSet();
 		void CreateFixedSamplers();
+		// P-F: the 1x1 white null texture every tombstone write points a
+		// freed slot at (a REAL descriptor - nulling the slot instead
+		// requires the nullDescriptor feature, and even enabled it faults
+		// the current NVIDIA driver).
+		void CreateNullTexture();
+		void DestroyNullTexture();
+
+		// P-F: the descriptor write log. All writes - creation, rewrite,
+		// tombstone - append here; nothing writes a set directly. A slot's
+		// set applies its pending entries at record start
+		// (ApplyDescriptorLog).
+		struct DescriptorWriteLogEntry
+		{
+			enum class Kind : uint8_t { Texture, Buffer, Tombstone };
+
+			Kind           Kind_ = Kind::Texture;
+			uint64_t       Seq = 0;
+			uint32_t       Index = 0; // array element in the bindless binding
+			VkImageView    ImageView = VK_NULL_HANDLE;
+			VkSampler      Sampler = VK_NULL_HANDLE;
+			VkImageLayout  ImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			VkBuffer       Buffer = VK_NULL_HANDLE;
+		};
+
+		// The oldest applied seq across all slots - the log-entry GC and
+		// the tombstone-recycle floor (callers hold m_DescriptorLogMutex).
+		uint64_t MinLastAppliedSeq() const;
+		// Moves every pending-reuse index whose tombstone every slot has
+		// applied back to the free list (m_DescriptorLogMutex held).
+		void TryRecyclePendingIndices();
 
 		struct RetireEntry
 		{
@@ -253,6 +298,10 @@ namespace rhi {
 			VkShaderModule ShaderModule = VK_NULL_HANDLE;
 			uint32_t    BindlessIndex = 0;
 			bool        HasBindlessIndex = false;
+			// P-F: the tombstone log write's seq (0 = none). The index is
+			// reusable only once the timeline passed the stamp AND every
+			// slot's set has applied this seq.
+			uint64_t    TombstoneSeq = 0;
 		};
 		void QueueRetire(RetireEntry&& entry);
 		void FreeRetireEntry(const RetireEntry& entry);
@@ -343,9 +392,29 @@ namespace rhi {
 		VkSampler m_FixedSamplerLinear = VK_NULL_HANDLE;
 		VkSampler m_FixedSamplerNearest = VK_NULL_HANDLE;
 
+		// P-F: the tombstone target (a real 1x1 white texture) - freed
+		// slots point here until recycled, so no slot's set ever names a
+		// destroyed view and no null-handle write is needed.
+		VkImage m_NullTextureImage = VK_NULL_HANDLE;
+		VmaAllocation m_NullTextureAllocation = VK_NULL_HANDLE;
+		VkImageView m_NullTextureView = VK_NULL_HANDLE;
+		VkSampler m_NullTextureSampler = VK_NULL_HANDLE;
+
 		VkDescriptorSetLayout m_GlobalSetLayout = VK_NULL_HANDLE;
 		VkDescriptorPool m_GlobalSetPool = VK_NULL_HANDLE;
-		VkDescriptorSet m_GlobalSet = VK_NULL_HANDLE;
+		// One set per frame slot (identical layout); a slot's set is only
+		// written when that slot begins recording (its previous
+		// submission has retired by then).
+		VkDescriptorSet m_GlobalSets[VulkanDevice::TotalFrameSlots] = {};
+
+		// P-F: the write log + per-slot apply bookkeeping. Guarded by
+		// m_DescriptorLogMutex (appends happen on the game thread at
+		// creation/destruction; the apply + bind run on record threads).
+		std::vector<DescriptorWriteLogEntry> m_DescriptorWriteLog;
+		uint64_t m_NextDescriptorSeq = 1;
+		uint64_t m_LastAppliedSeq[VulkanDevice::TotalFrameSlots] = {};
+		std::vector<std::pair<uint32_t, uint64_t>> m_PendingIndexReuse; // (index, tombstone seq)
+		mutable std::mutex m_DescriptorLogMutex;
 
 		std::vector<uint32_t> m_FreeBindlessIndices;
 		uint32_t m_NextBindlessIndex = 0;

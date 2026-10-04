@@ -453,13 +453,12 @@ namespace TinyEngine {
 		features2.features.samplerAnisotropy = m_SamplerAnisotropySupported ? VK_TRUE : VK_FALSE;
 
 		const char* deviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
-
 		VkDeviceCreateInfo createInfo{};
 		createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 		createInfo.pNext = &features2;
 		createInfo.queueCreateInfoCount = 1;
 		createInfo.pQueueCreateInfos = &queueCreateInfo;
-		createInfo.enabledExtensionCount = 1;
+		createInfo.enabledExtensionCount = (uint32_t)(sizeof(deviceExtensions) / sizeof(deviceExtensions[0]));
 		createInfo.ppEnabledExtensionNames = deviceExtensions;
 		// pEnabledFeatures is deliberately left null, the feature chain above (via
 		// pNext) is how features are requested when using VkPhysicalDeviceFeatures2.

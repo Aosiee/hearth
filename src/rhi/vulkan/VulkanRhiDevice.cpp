@@ -1,5 +1,6 @@
 #include "tepch.h"
 #include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
+#include "Platform/Vulkan/VulkanFrameContext.h" // GetRecordFrameIndex (the P-F slot pick)
 
 #include "TinyEngine/Core/Log.h"
 #include "TinyEngine/Core/Application.h"
@@ -327,8 +328,14 @@ namespace rhi {
 	{
 		// The global bindless set at set 0; the layout comes from the bound
 		// pipeline's layout, so BindPipeline must have run first.
+		// P-F: the record-side frame index picks the slot's SET; the apply
+		// below lands every logged descriptor write on it exactly when this
+		// slot begins recording (its previous submission has retired).
 		TE_CORE_ASSERT(m_BoundLayout != VK_NULL_HANDLE, "BindGlobalSet called before BindPipeline");
-		VkDescriptorSet set = m_Device->GetGlobalDescriptorSet();
+		const uint32_t slot = GetRecordFrameIndex();
+		TE_CORE_ASSERT(slot < VulkanDevice::TotalFrameSlots, "BindGlobalSet with an out-of-range record frame slot");
+		m_Device->ApplyDescriptorLog(slot);
+		VkDescriptorSet set = m_Device->GetGlobalDescriptorSet(slot);
 		vkCmdBindDescriptorSets(m_CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_BoundLayout, 0, 1, &set, 0, nullptr);
 	}
 
@@ -459,6 +466,7 @@ namespace rhi {
 		m_GraphicsQueue.Generation = 0;
 		CreateGlobalBindlessSet();
 		CreateFixedSamplers();
+		CreateNullTexture();
 	}
 
 	// The two fixed samplers Wisp picks from. Baked with Wisp's EXACT
@@ -498,6 +506,121 @@ namespace rhi {
 				"vkCreateSampler", __FILE__, __LINE__);
 			m_Vulkan.SetObjectName(VK_OBJECT_TYPE_SAMPLER, (uint64_t)m_FixedSamplerNearest, "Fixed Sampler (nearest, clamp)");
 		}
+	}
+
+	// P-F: the 1x1 white texture every tombstone write points a freed slot
+	// at. Always a REAL descriptor (no null-handle write): a slot whose
+	// view was destroyed can never be named again, and any code that
+	// samples a freed index gets a harmless white texel instead of
+	// undefined garbage.
+	void VulkanRhiDevice::CreateNullTexture()
+	{
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+		imageInfo.extent = { 1, 1, 1 };
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+
+		VulkanCheckResult(vmaCreateImage(m_Vulkan.GetAllocator(), &imageInfo, &allocInfo,
+			&m_NullTextureImage, &m_NullTextureAllocation, nullptr), "vmaCreateImage", __FILE__, __LINE__);
+		m_Vulkan.SetObjectName(VK_OBJECT_TYPE_IMAGE, (uint64_t)m_NullTextureImage, "Bindless Null Texture");
+
+		VkImageViewCreateInfo viewInfo{};
+		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewInfo.image = m_NullTextureImage;
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+		viewInfo.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		VulkanCheckResult(vkCreateImageView(m_Vulkan.GetDevice(), &viewInfo, nullptr, &m_NullTextureView),
+			"vkCreateImageView", __FILE__, __LINE__);
+		m_Vulkan.SetObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t)m_NullTextureView, "Bindless Null Texture View");
+
+		VkSamplerCreateInfo samplerInfo{};
+		samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		samplerInfo.magFilter = VK_FILTER_NEAREST;
+		samplerInfo.minFilter = VK_FILTER_NEAREST;
+		samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+		samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		samplerInfo.minLod = 0.0f;
+		samplerInfo.maxLod = 0.0f;
+		VulkanCheckResult(vkCreateSampler(m_Vulkan.GetDevice(), &samplerInfo, nullptr, &m_NullTextureSampler),
+			"vkCreateSampler", __FILE__, __LINE__);
+		m_Vulkan.SetObjectName(VK_OBJECT_TYPE_SAMPLER, (uint64_t)m_NullTextureSampler, "Bindless Null Texture Sampler");
+
+		// Fill the texel white on the transient pool (device init has no
+		// frame machinery to defer through - the waitIdle here is fine).
+		{
+			VkCommandBuffer cmd = m_Vulkan.BeginSingleTimeCommands();
+
+			VkImageMemoryBarrier2 toDst{};
+			toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+			toDst.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+			toDst.srcAccessMask = VK_ACCESS_2_NONE;
+			toDst.dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+			toDst.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+			toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			toDst.image = m_NullTextureImage;
+			toDst.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+			VkDependencyInfo toDstDep{};
+			toDstDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+			toDstDep.imageMemoryBarrierCount = 1;
+			toDstDep.pImageMemoryBarriers = &toDst;
+			vkCmdPipelineBarrier2(cmd, &toDstDep);
+
+			const VkClearColorValue white{ { 1.0f, 1.0f, 1.0f, 1.0f } };
+			const VkImageSubresourceRange range{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+			vkCmdClearColorImage(cmd, m_NullTextureImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &white, 1, &range);
+
+			VkImageMemoryBarrier2 toRead{};
+			toRead.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+			toRead.srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+			toRead.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+			toRead.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+			toRead.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT;
+			toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			toRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			toRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			toRead.image = m_NullTextureImage;
+			toRead.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+			VkDependencyInfo toReadDep{};
+			toReadDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+			toReadDep.imageMemoryBarrierCount = 1;
+			toReadDep.pImageMemoryBarriers = &toRead;
+			vkCmdPipelineBarrier2(cmd, &toReadDep);
+
+			m_Vulkan.EndSingleTimeCommands(cmd);
+		}
+	}
+
+	void VulkanRhiDevice::DestroyNullTexture()
+	{
+		// After DestroyGlobalBindlessSet: no set references the view.
+		if (m_NullTextureSampler != VK_NULL_HANDLE)
+			vkDestroySampler(m_Vulkan.GetDevice(), m_NullTextureSampler, nullptr);
+		if (m_NullTextureView != VK_NULL_HANDLE)
+			vkDestroyImageView(m_Vulkan.GetDevice(), m_NullTextureView, nullptr);
+		if (m_NullTextureImage != VK_NULL_HANDLE)
+			vmaDestroyImage(m_Vulkan.GetAllocator(), m_NullTextureImage, m_NullTextureAllocation);
+		m_NullTextureSampler = VK_NULL_HANDLE;
+		m_NullTextureView = VK_NULL_HANDLE;
+		m_NullTextureImage = VK_NULL_HANDLE;
+		m_NullTextureAllocation = VK_NULL_HANDLE;
 	}
 
 	void VulkanRhiDevice::ShutdownDevice()
@@ -547,6 +670,7 @@ namespace rhi {
 		m_Buffers.Clear();
 		DrainRetireQueueUnconditional();
 		DestroyGlobalBindlessSet();
+		DestroyNullTexture();
 		// The fixed samplers are device-owned (never in a retire entry).
 		if (m_FixedSamplerLinear != VK_NULL_HANDLE)
 			vkDestroySampler(m_Vulkan.GetDevice(), m_FixedSamplerLinear, nullptr);
@@ -582,10 +706,12 @@ namespace rhi {
 		// VARIABLE_DESCRIPTOR_COUNT (one binding per set, and the full
 		// capacity is allocated anyway - runtimeDescriptorArray sizes the
 		// shader's [] from descriptorCount). ALL_GRAPHICS: no compute
-		// pipelines exist yet.
+		// pipelines exist yet. P-F: UPDATE_UNUSED_WHILE_PENDING is the
+		// safety net for the tombstone rewrites (a freed slot is re-pointed
+		// at the null texture while the set may still be pending).
 		VkDescriptorBindingFlags flags[] = {
-			VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
-			VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+			VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,
+			VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,
 		};
 		VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
 		flagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
@@ -617,13 +743,15 @@ namespace rhi {
 		m_Vulkan.SetObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT, (uint64_t)m_GlobalSetLayout, "Global Bindless Set Layout");
 
 		VkDescriptorPoolSize poolSizes[2] = {
-			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kBindlessTextures },
-			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kBindlessBuffers },
+			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kBindlessTextures * VulkanDevice::TotalFrameSlots },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kBindlessBuffers * VulkanDevice::TotalFrameSlots },
 		};
 		VkDescriptorPoolCreateInfo poolInfo{};
 		poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
-		poolInfo.maxSets = 1;
+		// P-F: one set per frame slot (TotalFrameSlots identical sets; a
+		// slot's set is only written when that slot begins recording).
+		poolInfo.maxSets = VulkanDevice::TotalFrameSlots;
 		poolInfo.poolSizeCount = 2;
 		poolInfo.pPoolSizes = poolSizes;
 
@@ -634,33 +762,52 @@ namespace rhi {
 		VkDescriptorSetAllocateInfo allocInfo{};
 		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
 		allocInfo.descriptorPool = m_GlobalSetPool;
-		allocInfo.descriptorSetCount = 1;
-		allocInfo.pSetLayouts = &m_GlobalSetLayout;
+		allocInfo.descriptorSetCount = VulkanDevice::TotalFrameSlots;
+		VkDescriptorSetLayout layouts[VulkanDevice::TotalFrameSlots];
+		for (VkDescriptorSetLayout& layout : layouts)
+			layout = m_GlobalSetLayout;
+		allocInfo.pSetLayouts = layouts;
 
-		VulkanCheckResult(vkAllocateDescriptorSets(m_Vulkan.GetDevice(), &allocInfo, &m_GlobalSet),
+		VulkanCheckResult(vkAllocateDescriptorSets(m_Vulkan.GetDevice(), &allocInfo, m_GlobalSets),
 			"vkAllocateDescriptorSets", __FILE__, __LINE__);
-		m_Vulkan.SetObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET, (uint64_t)m_GlobalSet, "Global Bindless Set");
+		m_Vulkan.SetObjectName(VK_OBJECT_TYPE_DESCRIPTOR_SET, (uint64_t)m_GlobalSets[0], "Global Bindless Set");
 	}
 
 	void VulkanRhiDevice::DestroyGlobalBindlessSet()
 	{
-		// The set itself is freed with the pool (no FREE_DESCRIPTOR_SET flag).
+		// The sets are freed with the pool (no FREE_DESCRIPTOR_SET flag).
 		if (m_GlobalSetPool != VK_NULL_HANDLE)
 			vkDestroyDescriptorPool(m_Vulkan.GetDevice(), m_GlobalSetPool, nullptr);
 		if (m_GlobalSetLayout != VK_NULL_HANDLE)
 			vkDestroyDescriptorSetLayout(m_Vulkan.GetDevice(), m_GlobalSetLayout, nullptr);
-		m_GlobalSet = VK_NULL_HANDLE;
 		m_GlobalSetPool = VK_NULL_HANDLE;
 		m_GlobalSetLayout = VK_NULL_HANDLE;
+		for (VkDescriptorSet& set : m_GlobalSets)
+			set = VK_NULL_HANDLE;
+		m_DescriptorWriteLog.clear();
+		m_PendingIndexReuse.clear();
 	}
 
 	uint32_t VulkanRhiDevice::AllocateBindlessTextureIndex()
 	{
+		std::lock_guard lock(m_DescriptorLogMutex);
+
 		uint32_t index;
 		if (!m_FreeBindlessIndices.empty())
 		{
 			index = m_FreeBindlessIndices.back();
 			m_FreeBindlessIndices.pop_back();
+
+			// A recycled index's old entries (its tombstone, and anything
+			// else) are superseded by the new owner's write - drop them so
+			// the log stays bounded per index.
+			for (auto it = m_DescriptorWriteLog.begin(); it != m_DescriptorWriteLog.end();)
+			{
+				if (it->Index == index)
+					it = m_DescriptorWriteLog.erase(it);
+				else
+					++it;
+			}
 		}
 		else
 		{
@@ -672,21 +819,123 @@ namespace rhi {
 
 	void VulkanRhiDevice::WriteTextureDescriptor(uint32_t index, VkImageView imageView, VkSampler sampler, VkImageLayout layout)
 	{
-		VkDescriptorImageInfo imageInfo{};
-		imageInfo.imageLayout = layout;
-		imageInfo.imageView = imageView;
-		imageInfo.sampler = sampler;
+		// P-F: appends to the versioned write log; the write lands on a
+		// slot's set when that slot begins recording (ApplyDescriptorLog)
+		// - which, by the timeline, is after the slot's previous submission
+		// has retired, so a rewrite of a live index is always legal.
+		DescriptorWriteLogEntry entry;
+		entry.Kind_ = DescriptorWriteLogEntry::Kind::Texture;
+		entry.Index = index;
+		entry.ImageView = imageView;
+		entry.Sampler = sampler;
+		entry.ImageLayout = layout;
 
-		VkWriteDescriptorSet write{};
-		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		write.dstSet = m_GlobalSet;
-		write.dstBinding = 0;
-		write.dstArrayElement = index;
-		write.descriptorCount = 1;
-		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		write.pImageInfo = &imageInfo;
+		std::lock_guard lock(m_DescriptorLogMutex);
+		entry.Seq = m_NextDescriptorSeq++;
+		m_DescriptorWriteLog.push_back(entry);
+	}
 
-		vkUpdateDescriptorSets(m_Vulkan.GetDevice(), 1, &write, 0, nullptr);
+	void VulkanRhiDevice::ApplyDescriptorLog(uint32_t slot)
+	{
+		TE_CORE_ASSERT(slot < VulkanDevice::TotalFrameSlots, "descriptor apply with an out-of-range frame slot");
+
+		std::lock_guard lock(m_DescriptorLogMutex);
+
+		const uint64_t lastApplied = m_LastAppliedSeq[slot];
+
+		// Collect the entries this slot hasn't applied yet (they are
+		// already in log order, seq ascending).
+		std::vector<VkWriteDescriptorSet> writes;
+		std::vector<VkDescriptorImageInfo> imageInfos;
+		writes.reserve(m_DescriptorWriteLog.size());
+		imageInfos.reserve(m_DescriptorWriteLog.size());
+
+		uint64_t maxSeq = lastApplied;
+		for (const DescriptorWriteLogEntry& entry : m_DescriptorWriteLog)
+		{
+			if (entry.Seq <= lastApplied)
+				continue;
+
+			VkWriteDescriptorSet write{};
+			write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			write.dstSet = m_GlobalSets[slot];
+			write.dstBinding = 0;
+			write.dstArrayElement = entry.Index;
+			write.descriptorCount = 1;
+
+			if (entry.Kind_ == DescriptorWriteLogEntry::Kind::Buffer)
+			{
+				// Reserved: the storage-buffer binding is not written by any
+				// current path (P-F covers the schema for its future user).
+				continue;
+			}
+
+			VkDescriptorImageInfo imageInfo{};
+			imageInfo.imageLayout = entry.ImageLayout;
+			imageInfo.imageView = entry.ImageView;
+			imageInfo.sampler = entry.Sampler; // a tombstone writes null handles
+			imageInfos.push_back(imageInfo);
+
+			write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			write.pImageInfo = &imageInfos.back();
+			writes.push_back(write);
+			maxSeq = entry.Seq;
+		}
+
+		if (!writes.empty())
+		{
+			vkUpdateDescriptorSets(m_Vulkan.GetDevice(), (uint32_t)writes.size(), writes.data(), 0, nullptr);
+			m_LastAppliedSeq[slot] = maxSeq;
+		}
+		else
+		{
+			m_LastAppliedSeq[slot] = lastApplied; // nothing pending; keep the floor
+		}
+
+		// GC: an entry every slot has applied is dead weight (the log would
+		// otherwise grow forever across a long session's loads/unloads).
+		const uint64_t floor = MinLastAppliedSeq();
+		size_t keep = 0;
+		for (size_t i = 0; i < m_DescriptorWriteLog.size(); i++)
+		{
+			if (m_DescriptorWriteLog[i].Seq <= floor)
+				continue;
+			if (keep != i)
+				m_DescriptorWriteLog[keep] = m_DescriptorWriteLog[i];
+			keep++;
+		}
+		m_DescriptorWriteLog.resize(keep);
+
+		TryRecyclePendingIndices();
+	}
+
+	uint64_t VulkanRhiDevice::MinLastAppliedSeq() const
+	{
+		uint64_t min = m_LastAppliedSeq[0];
+		for (uint32_t i = 1; i < VulkanDevice::TotalFrameSlots; i++)
+			min = std::min(min, m_LastAppliedSeq[i]);
+		return min;
+	}
+
+	void VulkanRhiDevice::TryRecyclePendingIndices()
+	{
+		// m_DescriptorLogMutex held. An index becomes reusable once every
+		// slot's set has applied the tombstone that cleared it.
+		const uint64_t floor = MinLastAppliedSeq();
+
+		size_t write = 0;
+		for (size_t i = 0; i < m_PendingIndexReuse.size(); i++)
+		{
+			if (m_PendingIndexReuse[i].second <= floor)
+			{
+				m_FreeBindlessIndices.push_back(m_PendingIndexReuse[i].first);
+				continue;
+			}
+			if (write != i)
+				m_PendingIndexReuse[write] = m_PendingIndexReuse[i];
+			write++;
+		}
+		m_PendingIndexReuse.resize(write);
 	}
 
 	void VulkanRhiDevice::QueueTextureForDestruction(VkImage image, VmaAllocation allocation,
@@ -699,7 +948,28 @@ namespace rhi {
 		entry.ImageView = imageView;
 		entry.Sampler = sampler;
 		entry.BindlessIndex = bindlessIndex;
-		entry.HasBindlessIndex = true;
+		// A barrier-only adoption carries the ~0u sentinel (no bindless
+		// slot) - it must never enter the free list or get a tombstone.
+		entry.HasBindlessIndex = bindlessIndex < kBindlessTextures;
+
+		// P-F: the tombstone re-points the slot at the null texture (a REAL
+		// descriptor - nulling the slot needs the nullDescriptor feature,
+		// which even enabled faults the current NVIDIA driver). The index
+		// is recycled only after every slot applied it.
+		if (entry.HasBindlessIndex)
+		{
+			DescriptorWriteLogEntry tombstone;
+			tombstone.Kind_ = DescriptorWriteLogEntry::Kind::Tombstone;
+			tombstone.Index = bindlessIndex;
+			tombstone.ImageView = m_NullTextureView;
+			tombstone.Sampler = m_NullTextureSampler;
+			tombstone.ImageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			std::lock_guard lock(m_DescriptorLogMutex);
+			tombstone.Seq = m_NextDescriptorSeq++;
+			m_DescriptorWriteLog.push_back(tombstone);
+			entry.TombstoneSeq = tombstone.Seq;
+		}
+
 		QueueRetire(std::move(entry));
 	}
 
@@ -748,6 +1018,15 @@ namespace rhi {
 
 	void VulkanRhiDevice::FreeRetireEntry(const RetireEntry& entry)
 	{
+		// P-F: the destruction of a texture's Vk view and the purge of its
+		// REAL log entries must be atomic w.r.t. ApplyDescriptorLog - a
+		// record worker mid-apply holds this mutex, so destroying the view
+		// only here (under the same lock) guarantees no apply can ever
+		// touch a freed VkImageView, and no worker that already copied the
+		// write can race the free (DrainRetireQueue runs on the game
+		// thread, the apply on record workers).
+		std::lock_guard lock(m_DescriptorLogMutex);
+
 		switch (entry.Kind_)
 		{
 		case RetireEntry::Kind::Texture:
@@ -778,7 +1057,28 @@ namespace rhi {
 			break;
 		}
 		if (entry.HasBindlessIndex)
-			m_FreeBindlessIndices.push_back(entry.BindlessIndex);
+		{
+			// P-F: the index returns to the free list only when its
+			// tombstone has been applied to EVERY slot's set (until then
+			// some slot's set still names the destroyed view).
+			// Every REAL write for this index is now dead weight that must
+			// never be applied (a slot replaying it would dereference the
+			// freed view, and the min-lastApplied GC floor never advances
+			// while any slot is idle). Drop them; the tombstone stays to
+			// clear the slots.
+			for (auto it = m_DescriptorWriteLog.begin(); it != m_DescriptorWriteLog.end();)
+			{
+				if (it->Index == entry.BindlessIndex && it->Kind_ != DescriptorWriteLogEntry::Kind::Tombstone)
+					it = m_DescriptorWriteLog.erase(it);
+				else
+					++it;
+			}
+
+			if (entry.TombstoneSeq == 0 || entry.TombstoneSeq <= MinLastAppliedSeq())
+				m_FreeBindlessIndices.push_back(entry.BindlessIndex);
+			else
+				m_PendingIndexReuse.emplace_back(entry.BindlessIndex, entry.TombstoneSeq);
+		}
 	}
 
 	void VulkanRhiDevice::DrainRetireQueue()
@@ -812,14 +1112,25 @@ namespace rhi {
 
 	bool VulkanRhiDevice::IsBindlessIndexLive(uint32_t index) const
 	{
+		std::lock_guard lock(m_DescriptorLogMutex);
 		if (index >= m_NextBindlessIndex)
 			return false;
 		for (uint32_t freeIndex : m_FreeBindlessIndices)
-		{
 			if (freeIndex == index)
 				return false;
-		}
+		for (const auto& [pendingIndex, seq] : m_PendingIndexReuse)
+			if (pendingIndex == index)
+				return false;
 		return true;
+	}
+
+	bool VulkanRhiDevice::IsBindlessIndexRecycled(uint32_t index) const
+	{
+		std::lock_guard lock(m_DescriptorLogMutex);
+		for (uint32_t freeIndex : m_FreeBindlessIndices)
+			if (freeIndex == index)
+				return true;
+		return false;
 	}
 
 	// ---- Buffer -----------------------------------------------------------------
