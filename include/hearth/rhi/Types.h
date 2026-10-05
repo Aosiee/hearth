@@ -8,6 +8,8 @@
 
 #include <cstdint>
 
+#include "assetio/AssetID.h"
+
 namespace TinyEngine {
 namespace rhi {
 
@@ -23,6 +25,15 @@ namespace rhi {
 	struct TextureHandle      : Handle {};
 	struct SamplerHandle      : Handle {};
 	struct ShaderHandle       : Handle {};
+
+	// The asset-side identity of a shader (the AssetID it was
+	// loaded from + the permutation variant key, 0 = no variants). Stored
+	// on the shader entry; Device::InvalidatePipelines keys on it.
+	struct ShaderIdentity
+	{
+		AssetID Asset;
+		uint64_t VariantKey = 0;
+	};
 	struct PipelineHandle     : Handle {};
 	struct CommandListHandle  : Handle {};
 	struct SwapchainHandle    : Handle {};

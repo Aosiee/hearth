@@ -2,6 +2,7 @@
 
 #include "Platform/Vulkan/VulkanCommon.h"
 #include "Platform/Vulkan/VulkanDevice.h"
+#include "TinyEngine/RHI/Types.h"
 
 namespace TinyEngine {
 
@@ -18,11 +19,18 @@ namespace TinyEngine {
 
 		VkShaderModule GetHandle() const { return m_Module; }
 		VkShaderStageFlagBits GetStage() const { return m_Stage; }
+		const std::vector<uint32_t>& GetSpirV() const { return m_SpirV; }
+
+		// The asset-side identity (AssetID + variant key) for
+		// InvalidatePipelines; HasIdentity false for unidentified shaders.
+		rhi::ShaderIdentity Identity;
+		bool HasIdentity = false;
 
 	private:
 		VulkanDevice* m_Device = nullptr;
 		VkShaderModule m_Module = VK_NULL_HANDLE;
 		VkShaderStageFlagBits m_Stage = VK_SHADER_STAGE_VERTEX_BIT;
+		std::vector<uint32_t> m_SpirV;
 	};
 
 }

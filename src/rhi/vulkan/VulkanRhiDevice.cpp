@@ -5,8 +5,12 @@
 #include "TinyEngine/Core/Log.h"
 #include "TinyEngine/Core/Application.h"
 #include "TinyEngine/Core/RhiDevice.h"
+#include "TinyEngine/CVar/EngineCVars.h"
+#include <blake3.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 
 namespace TinyEngine {
 
@@ -328,13 +332,15 @@ namespace rhi {
 	{
 		// The global bindless set at set 0; the layout comes from the bound
 		// pipeline's layout, so BindPipeline must have run first.
-		// P-F: the record-side frame index picks the slot's SET; the apply
-		// below lands every logged descriptor write on it exactly when this
-		// slot begins recording (its previous submission has retired).
+		// The record-side frame index picks the slot's SET. The set itself
+		// is applied ONCE per slot by the submit thread BEFORE the record
+		// fan-out (ProcessSubmittedFrame) - applying it here would update
+		// the set concurrently with the sibling workers' binds and draws on
+		// the same set (a host-access race the driver's bind path then
+		// crashes on).
 		TE_CORE_ASSERT(m_BoundLayout != VK_NULL_HANDLE, "BindGlobalSet called before BindPipeline");
 		const uint32_t slot = GetRecordFrameIndex();
 		TE_CORE_ASSERT(slot < VulkanDevice::TotalFrameSlots, "BindGlobalSet with an out-of-range record frame slot");
-		m_Device->ApplyDescriptorLog(slot);
 		VkDescriptorSet set = m_Device->GetGlobalDescriptorSet(slot);
 		vkCmdBindDescriptorSets(m_CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_BoundLayout, 0, 1, &set, 0, nullptr);
 	}
@@ -467,6 +473,64 @@ namespace rhi {
 		CreateGlobalBindlessSet();
 		CreateFixedSamplers();
 		CreateNullTexture();
+		CreatePipelineCache();
+	}
+
+	// The driver pipeline cache (VkPipelineCache) - loaded from
+	// saved/cache/pipeline.bin when r.shader.pipelineCacheFile is on and
+	// the file's 16-byte header matches the driver's pipelineCacheUUID.
+	void VulkanRhiDevice::CreatePipelineCache()
+	{
+		VkPipelineCacheCreateInfo info{};
+		info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+		std::vector<uint8_t> blob;
+		if (TinyEngine::cvars::r_shader_pipelineCacheFile.Get())
+		{
+			std::ifstream file("saved/cache/pipeline.bin", std::ios::binary);
+			if (file.is_open())
+			{
+				std::vector<uint8_t> cached((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+				if (cached.size() > VK_UUID_SIZE)
+				{
+					VkPhysicalDeviceProperties props{};
+					vkGetPhysicalDeviceProperties(m_Vulkan.GetPhysicalDevice(), &props);
+					if (memcmp(cached.data(), props.pipelineCacheUUID, VK_UUID_SIZE) == 0)
+					{
+						blob.assign(cached.begin() + VK_UUID_SIZE, cached.end());
+						info.initialDataSize = blob.size();
+						info.pInitialData = blob.data();
+					}
+				}
+			}
+		}
+		VK_CHECK(vkCreatePipelineCache(m_Vulkan.GetDevice(), &info, nullptr, &m_VkPipelineCache));
+	}
+
+	void VulkanRhiDevice::SavePipelineCache()
+	{
+		if (m_VkPipelineCache == VK_NULL_HANDLE)
+			return;
+		if (!TinyEngine::cvars::r_shader_pipelineCacheFile.Get())
+		{
+			vkDestroyPipelineCache(m_Vulkan.GetDevice(), m_VkPipelineCache, nullptr);
+			m_VkPipelineCache = VK_NULL_HANDLE;
+			return;
+		}
+		size_t size = 0;
+		VK_CHECK(vkGetPipelineCacheData(m_Vulkan.GetDevice(), m_VkPipelineCache, &size, nullptr));
+		std::vector<uint8_t> blob(VK_UUID_SIZE + size);
+		VkPhysicalDeviceProperties props{};
+		vkGetPhysicalDeviceProperties(m_Vulkan.GetPhysicalDevice(), &props);
+		memcpy(blob.data(), props.pipelineCacheUUID, VK_UUID_SIZE);
+		if (size > 0)
+			VK_CHECK(vkGetPipelineCacheData(m_Vulkan.GetDevice(), m_VkPipelineCache, &size, blob.data() + VK_UUID_SIZE));
+		vkDestroyPipelineCache(m_Vulkan.GetDevice(), m_VkPipelineCache, nullptr);
+		m_VkPipelineCache = VK_NULL_HANDLE;
+		std::error_code ec;
+		std::filesystem::create_directories("saved/cache", ec);
+		std::ofstream file("saved/cache/pipeline.bin", std::ios::binary | std::ios::trunc);
+		if (file.is_open())
+			file.write((const char*)blob.data(), (std::streamsize)blob.size());
 	}
 
 	// The two fixed samplers Wisp picks from. Baked with Wisp's EXACT
@@ -628,6 +692,11 @@ namespace rhi {
 		if (!m_Initialized)
 			return;
 
+		// The cache entries are referenced by the table slots - the sweep
+		// below owns their destruction, so the cache map itself just
+		// clears (the refcounts die with it).
+		m_PipelineCache.clear();
+
 		// With no submits left the timeline never advances again: idle the
 		// device, drain everything queued so far, queue every still-live
 		// non-texture resource (the wrappers have no freeing destructors -
@@ -678,6 +747,9 @@ namespace rhi {
 			vkDestroySampler(m_Vulkan.GetDevice(), m_FixedSamplerNearest, nullptr);
 		m_FixedSamplerLinear = VK_NULL_HANDLE;
 		m_FixedSamplerNearest = VK_NULL_HANDLE;
+		// Persist the driver pipeline cache before the device dies (the
+		// blob comes from the driver itself).
+		SavePipelineCache();
 		m_Vulkan.Shutdown();
 		m_Initialized = false;
 	}
@@ -1146,7 +1218,7 @@ namespace rhi {
 		BufferHandle handle = m_Buffers.Acquire();
 		VulkanBuffer* buffer = new VulkanBuffer();
 		buffer->Init(m_Vulkan, desc.Size, usage, desc.HostVisible, debugName);
-		m_Buffers.Slots[handle.Index].Object.reset(buffer);
+		m_Buffers.Publish(handle, std::unique_ptr<VulkanBuffer>(buffer));
 		return handle;
 	}
 
@@ -1159,7 +1231,12 @@ namespace rhi {
 			else
 				QueueBufferForDestruction(buffer->GetHandle(), buffer->GetAllocation());
 		}
-		TE_CORE_ASSERT(m_Buffers.Release(handle), "destroying an invalid/stale RHI buffer");
+		// Hoisted out of the assert: the Release is a real side effect and
+		// must run in every config (in release/shipping the assert argument
+		// is compiled out, leaving the slot alive and the ShutdownDevice
+		// sweep double-queues the freed object).
+		const bool bufferReleased = m_Buffers.Release(handle);
+		TE_CORE_ASSERT(bufferReleased, "destroying an invalid/stale RHI buffer");
 	}
 
 	BufferHandle VulkanRhiDevice::AdoptExternalBuffer(VkBuffer buffer, VmaAllocation allocation)
@@ -1168,7 +1245,7 @@ namespace rhi {
 		BufferHandle handle = m_Buffers.Acquire();
 		VulkanBuffer* adopted = new VulkanBuffer();
 		adopted->Adopt(buffer, allocation);
-		m_Buffers.Slots[handle.Index].Object.reset(adopted);
+		m_Buffers.Publish(handle, std::unique_ptr<VulkanBuffer>(adopted));
 		return handle;
 	}
 
@@ -1213,7 +1290,7 @@ namespace rhi {
 		}
 		std::unique_ptr<VulkanTextureEntry> entry = std::make_unique<VulkanTextureEntry>();
 		entry->Owned.reset(texture);
-		m_Textures.Slots[handle.Index].Object = std::move(entry);
+		m_Textures.Publish(handle, std::move(entry));
 
 		// The texture's ctor already wrote its bindless descriptor with its
 		// baked (linear, repeat) sampler; for the single-level path, re-write
@@ -1237,7 +1314,7 @@ namespace rhi {
 		TextureHandle handle = m_Textures.Acquire();
 		std::unique_ptr<VulkanTextureEntry> entry = std::make_unique<VulkanTextureEntry>();
 		entry->Owned.reset(new VulkanTexture2D(width, height, mipLevels));
-		m_Textures.Slots[handle.Index].Object = std::move(entry);
+		m_Textures.Publish(handle, std::move(entry));
 		(void)debugName;
 		return handle;
 	}
@@ -1267,7 +1344,7 @@ namespace rhi {
 		TextureHandle handle = m_Textures.Acquire();
 		std::unique_ptr<VulkanTextureEntry> entry = std::make_unique<VulkanTextureEntry>();
 		entry->Wrapped.reset(new VulkanWrappedTexture(index, view, image));
-		m_Textures.Slots[handle.Index].Object = std::move(entry);
+		m_Textures.Publish(handle, std::move(entry));
 		(void)width; (void)height;
 		return handle;
 	}
@@ -1282,7 +1359,7 @@ namespace rhi {
 		TextureHandle handle = m_Textures.Acquire();
 		std::unique_ptr<VulkanTextureEntry> entry = std::make_unique<VulkanTextureEntry>();
 		entry->Wrapped.reset(new VulkanWrappedTexture(~0u, VK_NULL_HANDLE, (VkImage)nativeImage));
-		m_Textures.Slots[handle.Index].Object = std::move(entry);
+		m_Textures.Publish(handle, std::move(entry));
 		return handle;
 	}
 
@@ -1297,7 +1374,8 @@ namespace rhi {
 			if (entry->IsWrapped() && entry->Wrapped->GetView() != VK_NULL_HANDLE)
 				QueueTextureForDestruction(VK_NULL_HANDLE, VK_NULL_HANDLE, entry->Wrapped->GetView(), VK_NULL_HANDLE, entry->Wrapped->GetBindlessIndex());
 		}
-		TE_CORE_ASSERT(m_Textures.Release(handle), "destroying an invalid/stale RHI texture");
+		const bool textureReleased = m_Textures.Release(handle);
+		TE_CORE_ASSERT(textureReleased, "destroying an invalid/stale RHI texture");
 	}
 
 	void VulkanRhiDevice::SetTextureData(TextureHandle handle, const void* data, uint64_t size)
@@ -1338,7 +1416,7 @@ namespace rhi {
 		SamplerHandle handle = m_Samplers.Acquire();
 		VulkanSampler* sampler = new VulkanSampler();
 		sampler->Init(m_Vulkan, desc, debugName);
-		m_Samplers.Slots[handle.Index].Object.reset(sampler);
+		m_Samplers.Publish(handle, std::unique_ptr<VulkanSampler>(sampler));
 		return handle;
 	}
 
@@ -1346,29 +1424,104 @@ namespace rhi {
 	{
 		if (VulkanSampler* sampler = m_Samplers.Get(handle))
 			QueueSamplerForDestruction(sampler->GetHandle());
-		TE_CORE_ASSERT(m_Samplers.Release(handle), "destroying an invalid/stale RHI sampler");
+		const bool samplerReleased = m_Samplers.Release(handle);
+		TE_CORE_ASSERT(samplerReleased, "destroying an invalid/stale RHI sampler");
 	}
 
-	ShaderHandle VulkanRhiDevice::CreateShader(std::span<const uint32_t> spirv, ShaderStage stage, const char* debugName)
+	ShaderHandle VulkanRhiDevice::CreateShader(std::span<const uint32_t> spirv, ShaderStage stage, const char* debugName, const ShaderIdentity* identity)
 	{
 		TE_CORE_ASSERT(m_Initialized, "RHI shader created before the device");
 		ShaderHandle handle = m_Shaders.Acquire();
 		VulkanShaderModule* shader = new VulkanShaderModule();
 		shader->Init(m_Vulkan, std::vector<uint32_t>(spirv.begin(), spirv.end()), ToVkStage(stage), debugName);
-		m_Shaders.Slots[handle.Index].Object.reset(shader);
+		if (identity)
+		{
+			shader->Identity = *identity;
+			shader->HasIdentity = true;
+		}
+		m_Shaders.Publish(handle, std::unique_ptr<VulkanShaderModule>(shader));
 		return handle;
 	}
 
 	void VulkanRhiDevice::DestroyShader(ShaderHandle handle)
 	{
+		// Pipelines bake the shader modules in - evict every cached
+		// pipeline referencing the dying shader first.
+		std::vector<PipelineCacheKey> evict;
+		for (const auto& [key, entry] : m_PipelineCache)
+			if ((key.VertexShader.Index == handle.Index && key.VertexShader.Generation == handle.Generation) ||
+				(key.FragmentShader.Index == handle.Index && key.FragmentShader.Generation == handle.Generation))
+				evict.push_back(key);
+		for (const PipelineCacheKey& key : evict)
+			EvictPipelineEntry(key);
+
 		if (VulkanShaderModule* shader = m_Shaders.Get(handle))
 			QueueShaderForDestruction(shader->GetHandle());
-		TE_CORE_ASSERT(m_Shaders.Release(handle), "destroying an invalid/stale RHI shader");
+		const bool shaderReleased = m_Shaders.Release(handle);
+		TE_CORE_ASSERT(shaderReleased, "destroying an invalid/stale RHI shader");
+	}
+
+	uint64_t VulkanRhiDevice::HashPipelineStateDesc(const PipelineStateDesc& desc)
+	{
+		blake3_hasher hasher;
+		blake3_hasher_init(&hasher);
+		auto feed = [&](const void* p, size_t n) { blake3_hasher_update(&hasher, p, n); };
+		uint64_t vs = ((uint64_t)desc.VertexShader.Index << 32) | desc.VertexShader.Generation;
+		uint64_t fs = ((uint64_t)desc.FragmentShader.Index << 32) | desc.FragmentShader.Generation;
+		feed(&vs, sizeof(vs));
+		feed(&fs, sizeof(fs));
+		feed(&desc.VertexStride, sizeof(desc.VertexStride));
+		for (const auto& attribute : desc.VertexAttributes)
+		{
+			uint32_t location = attribute.Location;
+			uint32_t format = (uint32_t)attribute.PixelFormat;
+			uint32_t offset = attribute.Offset;
+			feed(&location, sizeof(location));
+			feed(&format, sizeof(format));
+			feed(&offset, sizeof(offset));
+		}
+		uint32_t blend = desc.EnableBlend ? 1u : 0u;
+		uint32_t preserveAlpha = desc.PreserveDestinationAlpha ? 1u : 0u;
+		uint32_t depthTest = desc.DepthTestEnable ? 1u : 0u;
+		uint32_t depthWrite = desc.DepthWriteEnable ? 1u : 0u;
+		uint32_t compareOp = (uint32_t)desc.DepthCompareOp;
+		uint32_t colourFormat = (uint32_t)desc.ColorAttachmentFormat;
+		uint32_t depthFormat = (uint32_t)desc.DepthAttachmentFormat;
+		feed(&blend, sizeof(blend));
+		feed(&preserveAlpha, sizeof(preserveAlpha));
+		feed(&depthTest, sizeof(depthTest));
+		feed(&depthWrite, sizeof(depthWrite));
+		feed(&compareOp, sizeof(compareOp));
+		feed(&colourFormat, sizeof(colourFormat));
+		feed(&depthFormat, sizeof(depthFormat));
+		feed(&desc.PushConstantSize, sizeof(desc.PushConstantSize));
+		feed(&desc.PushConstantStages, sizeof(desc.PushConstantStages));
+		uint8_t out[BLAKE3_OUT_LEN];
+		blake3_hasher_finalize(&hasher, out, sizeof(out));
+		uint64_t hash = 0;
+		for (int i = 0; i < 8; i++)
+			hash = (hash << 8) | out[i];
+		return hash;
 	}
 
 	PipelineHandle VulkanRhiDevice::CreatePipeline(const PipelineStateDesc& desc, const char* debugName)
 	{
 		TE_CORE_ASSERT(m_Initialized, "RHI pipeline created before the device");
+
+		// The cache lookup - keyed by (state hash, vertex shader handle,
+		// fragment shader handle). A hit returns the cached pipeline
+		// (refcounted); a miss creates one through the driver's
+		// VkPipelineCache.
+		PipelineCacheKey key;
+		key.StateHash = HashPipelineStateDesc(desc);
+		key.VertexShader = desc.VertexShader;
+		key.FragmentShader = desc.FragmentShader;
+		auto cached = m_PipelineCache.find(key);
+		if (cached != m_PipelineCache.end())
+		{
+			cached->second.RefCount++;
+			return cached->second.Handle;
+		}
 
 		VulkanPipelineSpec spec;
 		spec.VertexShader = m_Shaders.Get(desc.VertexShader);
@@ -1391,16 +1544,66 @@ namespace rhi {
 
 		PipelineHandle handle = m_Pipelines.Acquire();
 		VulkanPipeline* pipeline = new VulkanPipeline();
-		pipeline->Init(m_Vulkan, spec, debugName);
-		m_Pipelines.Slots[handle.Index].Object.reset(pipeline);
+		pipeline->Init(m_Vulkan, spec, debugName, m_VkPipelineCache);
+		m_Pipelines.Publish(handle, std::unique_ptr<VulkanPipeline>(pipeline));
+
+		PipelineCacheEntry entry;
+		entry.Handle = handle;
+		entry.RefCount = 1;
+		m_PipelineCache.emplace(key, entry);
 		return handle;
+	}
+
+	void VulkanRhiDevice::EvictPipelineEntry(const PipelineCacheKey& key)
+	{
+		auto it = m_PipelineCache.find(key);
+		if (it == m_PipelineCache.end())
+			return;
+		const PipelineHandle handle = it->second.Handle;
+		if (VulkanPipeline* pipeline = m_Pipelines.Get(handle))
+			QueuePipelineForDestruction(pipeline->GetHandle(), pipeline->GetLayout());
+		m_Pipelines.Release(handle);
+		m_PipelineCache.erase(it);
 	}
 
 	void VulkanRhiDevice::DestroyPipeline(PipelineHandle handle)
 	{
+		// The refcounted cache path: the final destroy evicts the entry
+		// (queueing the Vk objects + releasing the slot).
+		for (auto it = m_PipelineCache.begin(); it != m_PipelineCache.end(); ++it)
+		{
+			if (it->second.Handle.Index == handle.Index && it->second.Handle.Generation == handle.Generation)
+			{
+				if (it->second.RefCount > 1)
+				{
+					it->second.RefCount--;
+					return;
+				}
+				EvictPipelineEntry(it->first);
+				return;
+			}
+		}
+
 		if (VulkanPipeline* pipeline = m_Pipelines.Get(handle))
 			QueuePipelineForDestruction(pipeline->GetHandle(), pipeline->GetLayout());
-		TE_CORE_ASSERT(m_Pipelines.Release(handle), "destroying an invalid/stale RHI pipeline");
+		const bool pipelineReleased = m_Pipelines.Release(handle);
+		TE_CORE_ASSERT(pipelineReleased, "destroying an invalid/stale RHI pipeline");
+	}
+
+	void VulkanRhiDevice::InvalidatePipelines(const AssetID& shaderAsset)
+	{
+		std::vector<PipelineCacheKey> evict;
+		for (const auto& [key, entry] : m_PipelineCache)
+		{
+			auto matchesAsset = [&](ShaderHandle handle) -> bool {
+				VulkanShaderModule* shader = m_Shaders.Get(handle);
+				return shader && shader->HasIdentity && shader->Identity.Asset == shaderAsset;
+			};
+			if (matchesAsset(key.VertexShader) || matchesAsset(key.FragmentShader))
+				evict.push_back(key);
+		}
+		for (const PipelineCacheKey& key : evict)
+			EvictPipelineEntry(key);
 	}
 
 	// ---- Command lists / queues / submit ------------------------------------------
@@ -1421,13 +1624,14 @@ namespace rhi {
 			"vkAllocateCommandBuffers", __FILE__, __LINE__);
 
 		CommandListHandle handle = m_CommandLists.Acquire();
-		m_CommandLists.Slots[handle.Index].Object.reset(new VulkanCommandList(this, commandBuffer));
+		m_CommandLists.Publish(handle, std::unique_ptr<VulkanCommandList>(new VulkanCommandList(this, commandBuffer)));
 		return handle;
 	}
 
 	void VulkanRhiDevice::DestroyCommandList(CommandListHandle handle)
 	{
-		TE_CORE_ASSERT(m_CommandLists.Release(handle), "destroying an invalid/stale RHI command list");
+		const bool commandListReleased = m_CommandLists.Release(handle);
+		TE_CORE_ASSERT(commandListReleased, "destroying an invalid/stale RHI command list");
 	}
 
 	CommandList* VulkanRhiDevice::GetCommandList(CommandListHandle handle)
@@ -1540,7 +1744,7 @@ namespace rhi {
 		// owner API for per-window state (P-D's WispWindowRenderState).
 		EnsureDevice((GLFWwindow*)window);
 		SwapchainHandle handle = m_Swapchains.Acquire();
-		m_Swapchains.Slots[handle.Index].Object = std::make_unique<VulkanSwapchain>();
+		m_Swapchains.Publish(handle, std::make_unique<VulkanSwapchain>());
 		m_Swapchains.Get(handle)->Init(m_Vulkan, (GLFWwindow*)window);
 		return handle;
 	}
@@ -1556,7 +1760,11 @@ namespace rhi {
 
 	VkBuffer VulkanRhiDevice::GetBufferHandle(BufferHandle handle) const
 	{
-		if (const VulkanBuffer* buffer = m_Buffers.Get(handle))
+		// The field read happens under the table's shared lock: the wrapper
+		// may be freed by a concurrent game-thread Release the instant the
+		// lock drops (the record workers read these during record).
+		std::shared_lock lock(m_Buffers.Mutex);
+		if (const VulkanBuffer* buffer = m_Buffers.GetNoLock(handle))
 			return buffer->GetHandle();
 		return VK_NULL_HANDLE;
 	}
@@ -1565,8 +1773,9 @@ namespace rhi {
 	{
 		// Wrapped entries carry no owned image (the caller owns it) - but the
 		// adopted image is recorded so barrier targets resolve through the
-		// same handle (P4-B).
-		if (const VulkanTextureEntry* entry = m_Textures.Get(handle))
+		// same handle (P4-B). Read under the table's shared lock.
+		std::shared_lock lock(m_Textures.Mutex);
+		if (const VulkanTextureEntry* entry = m_Textures.GetNoLock(handle))
 		{
 			if (entry->Owned)
 				return entry->Owned->GetImage();
@@ -1578,7 +1787,8 @@ namespace rhi {
 
 	VkImageView VulkanRhiDevice::GetTextureView(TextureHandle handle) const
 	{
-		if (const VulkanTextureEntry* entry = m_Textures.Get(handle))
+		std::shared_lock lock(m_Textures.Mutex);
+		if (const VulkanTextureEntry* entry = m_Textures.GetNoLock(handle))
 		{
 			if (entry->Owned)
 				return entry->Owned->GetImageView();
@@ -1588,7 +1798,8 @@ namespace rhi {
 
 	VkExtent2D VulkanRhiDevice::GetTextureSize(TextureHandle handle) const
 	{
-		if (const VulkanTextureEntry* entry = m_Textures.Get(handle))
+		std::shared_lock lock(m_Textures.Mutex);
+		if (const VulkanTextureEntry* entry = m_Textures.GetNoLock(handle))
 		{
 			if (entry->Owned)
 				return { entry->Owned->GetWidth(), entry->Owned->GetHeight() };
@@ -1598,14 +1809,16 @@ namespace rhi {
 
 	VkPipeline VulkanRhiDevice::GetPipelineHandle(PipelineHandle handle) const
 	{
-		if (const VulkanPipeline* pipeline = m_Pipelines.Get(handle))
+		std::shared_lock lock(m_Pipelines.Mutex);
+		if (const VulkanPipeline* pipeline = m_Pipelines.GetNoLock(handle))
 			return pipeline->GetHandle();
 		return VK_NULL_HANDLE;
 	}
 
 	VkPipelineLayout VulkanRhiDevice::GetPipelineLayout(PipelineHandle handle) const
 	{
-		if (const VulkanPipeline* pipeline = m_Pipelines.Get(handle))
+		std::shared_lock lock(m_Pipelines.Mutex);
+		if (const VulkanPipeline* pipeline = m_Pipelines.GetNoLock(handle))
 			return pipeline->GetLayout();
 		return VK_NULL_HANDLE;
 	}

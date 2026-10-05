@@ -3,7 +3,8 @@
 
 namespace TinyEngine {
 
-	void VulkanPipeline::Init(VulkanDevice& device, const VulkanPipelineSpec& spec, const std::string& debugName)
+	void VulkanPipeline::Init(VulkanDevice& device, const VulkanPipelineSpec& spec, const std::string& debugName,
+	                          VkPipelineCache cache)
 	{
 		m_Device = &device;
 
@@ -151,7 +152,7 @@ namespace TinyEngine {
 		pipelineCreateInfo.pDynamicState = &dynamicState;
 		pipelineCreateInfo.layout = m_Layout;
 
-		VK_CHECK(vkCreateGraphicsPipelines(device.GetDevice(), VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &m_Pipeline));
+		VK_CHECK(vkCreateGraphicsPipelines(device.GetDevice(), cache, 1, &pipelineCreateInfo, nullptr, &m_Pipeline));
 		device.SetObjectName(VK_OBJECT_TYPE_PIPELINE, (uint64_t)m_Pipeline, debugName);
 	}
 

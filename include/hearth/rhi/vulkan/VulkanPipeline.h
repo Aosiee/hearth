@@ -80,7 +80,9 @@ namespace TinyEngine {
 	class VulkanPipeline
 	{
 	public:
-		void Init(VulkanDevice& device, const VulkanPipelineSpec& spec, const std::string& debugName);
+		// cache = the driver pipeline cache (VK_NULL_HANDLE = none).
+		void Init(VulkanDevice& device, const VulkanPipelineSpec& spec, const std::string& debugName,
+		          VkPipelineCache cache = VK_NULL_HANDLE);
 		void Shutdown();
 
 		VkPipeline GetHandle() const { return m_Pipeline; }

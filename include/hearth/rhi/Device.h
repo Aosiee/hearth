@@ -102,8 +102,13 @@ namespace rhi {
 		virtual SamplerHandle CreateSampler(const SamplerDesc& desc, const char* debugName) = 0;
 		virtual void DestroySampler(SamplerHandle handle) = 0;
 
-		virtual ShaderHandle CreateShader(std::span<const uint32_t> spirv, ShaderStage stage, const char* debugName) = 0;
+		virtual ShaderHandle CreateShader(std::span<const uint32_t> spirv, ShaderStage stage, const char* debugName, const ShaderIdentity* identity = nullptr) = 0;
 		virtual void DestroyShader(ShaderHandle handle) = 0;
+
+		// Destroys + evicts every cached pipeline that references
+		// a shader loaded from `shaderAsset` (shader hot reload calls this
+		// before the new shader handles exist).
+		virtual void InvalidatePipelines(const AssetID& shaderAsset) = 0;
 
 		virtual PipelineHandle CreatePipeline(const PipelineStateDesc& desc, const char* debugName) = 0;
 		virtual void DestroyPipeline(PipelineHandle handle) = 0;

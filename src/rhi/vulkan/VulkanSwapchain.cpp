@@ -148,10 +148,10 @@ namespace TinyEngine {
 		return VK_PRESENT_MODE_FIFO_KHR;
 	}
 
-	// T-F-C: the game thread (the r.vsync cvar observer) only records the
-	// request; the submit thread applies it at its next frame start - the
-	// swapchain rebuild must never run on the game thread while the submit
-	// thread owns acquire/present.
+	// The game thread (the r.vsync cvar observer) records the request AND
+	// applies it (from VulkanContext::SwapBuffers, under the submit-idle
+	// park) - the swapchain rebuild must never run on the submit thread
+	// while the game thread owns the RHI handle tables.
 	void VulkanSwapchain::SetVsync(bool enabled)
 	{
 		m_PendingVsync.store(enabled ? 1u : 0u, std::memory_order_relaxed);
@@ -540,7 +540,9 @@ namespace TinyEngine {
 
 		if (result == VK_ERROR_OUT_OF_DATE_KHR)
 		{
-			RecreateFromSurfaceCapabilities();
+			// Raise the rebuild request - the game thread performs the
+			// rebuild (under the park) at its next SwapBuffers.
+			RequestRebuild();
 			return AcquireResult::OutOfDate;
 		}
 
@@ -636,7 +638,7 @@ namespace TinyEngine {
 		}
 
 		if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
-			RecreateFromSurfaceCapabilities();
+			RequestRebuild();
 		else
 			VK_CHECK(result);
 	}

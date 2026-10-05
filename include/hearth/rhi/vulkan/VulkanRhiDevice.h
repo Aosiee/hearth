@@ -18,6 +18,7 @@
 
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <vector>
 
 struct GLFWwindow;
@@ -181,6 +182,14 @@ namespace rhi {
 		// buffer-retire self-test asserts the mesh destruction path queues
 		// instead of destroying synchronously).
 		size_t GetRetireQueueSize() const { return m_RetireQueue.size(); }
+		size_t GetPipelineCacheSize() const { return m_PipelineCache.size(); }
+		// The reload no-op guard compares the re-read SPIR-V against
+		// the shader's current module (nullptr when absent).
+		const std::vector<uint32_t>* GetShaderSpirV(ShaderHandle handle) const
+		{
+			const VulkanShaderModule* shader = m_Shaders.Get(handle);
+			return shader ? &shader->GetSpirV() : nullptr;
+		}
 
 		// ---- Device -------------------------------------------------------
 		BufferHandle CreateBuffer(const BufferDesc& desc, const char* debugName) override;
@@ -205,11 +214,12 @@ namespace rhi {
 		SamplerHandle CreateSampler(const SamplerDesc& desc, const char* debugName) override;
 		void DestroySampler(SamplerHandle handle) override;
 
-		ShaderHandle CreateShader(std::span<const uint32_t> spirv, ShaderStage stage, const char* debugName) override;
+		ShaderHandle CreateShader(std::span<const uint32_t> spirv, ShaderStage stage, const char* debugName, const ShaderIdentity* identity = nullptr) override;
 		void DestroyShader(ShaderHandle handle) override;
 
 		PipelineHandle CreatePipeline(const PipelineStateDesc& desc, const char* debugName) override;
 		void DestroyPipeline(PipelineHandle handle) override;
+		void InvalidatePipelines(const AssetID& shaderAsset) override;
 
 		CommandListHandle CreateCommandList(QueueHandle queue, uint32_t threadIndex) override;
 		void DestroyCommandList(CommandListHandle handle) override;
@@ -312,6 +322,16 @@ namespace rhi {
 		template <typename THandle, typename TObject>
 		struct Table
 		{
+			// The handle tables are read by the Loom record workers
+			// (GetBufferHandle/GetTextureView during record) while the game
+			// thread's extract mutates them
+			// (AdoptExternalBuffer/CreateBuffer/DestroyBuffer + streaming
+			// creates) - a plain vector reallocation torn by a concurrent
+			// Get() is a data race that corrupts the borrowed handle and
+			// SIGSEGVs in the driver. Readers take the shared lock (readers
+			// don't block readers); writers take the exclusive lock (they are
+			// infrequent, game-thread-only) - the same shape as the
+			// descriptor write log's mutex.
 			struct Slot
 			{
 				std::unique_ptr<TObject> Object;
@@ -320,9 +340,11 @@ namespace rhi {
 			};
 			std::vector<Slot> Slots;
 			std::vector<uint32_t> Free;
+			mutable std::shared_mutex Mutex;
 
 			THandle Acquire()
 			{
+				std::unique_lock lock(Mutex);
 				uint32_t index;
 				if (!Free.empty())
 				{
@@ -345,6 +367,7 @@ namespace rhi {
 
 			bool Release(const THandle& handle)
 			{
+				std::unique_lock lock(Mutex);
 				if (handle.Index >= Slots.size() || !Slots[handle.Index].Alive)
 					return false;
 				if (Slots[handle.Index].Generation != handle.Generation)
@@ -359,6 +382,16 @@ namespace rhi {
 
 			TObject* Get(const THandle& handle) const
 			{
+				std::shared_lock lock(Mutex);
+				return GetNoLock(handle);
+			}
+
+			// Unlocked lookup for callers that already hold the shared lock
+			// and need to read the object's fields under it (reading them
+			// AFTER Get()'s lock dropped is a use-after-free against a
+			// concurrent Release).
+			TObject* GetNoLock(const THandle& handle) const
+			{
 				if (handle.Index >= Slots.size() || !Slots[handle.Index].Alive)
 					return nullptr;
 				if (Slots[handle.Index].Generation != handle.Generation)
@@ -366,8 +399,21 @@ namespace rhi {
 				return Slots[handle.Index].Object.get();
 			}
 
+			// Publishes the slot's object AFTER the (slow) caller-side
+			// initialization - the write takes the exclusive lock so a
+			// concurrent Get() can never observe a half-published slot
+			// (the previous raw post-Acquire writes raced the shared Get()
+			// reads - a data race that corrupted handle lookups).
+			void Publish(const THandle& handle, std::unique_ptr<TObject> obj)
+			{
+				std::unique_lock lock(Mutex);
+				if (handle.Index < Slots.size())
+					Slots[handle.Index].Object = std::move(obj);
+			}
+
 			void Clear()
 			{
+				std::unique_lock lock(Mutex);
 				for (Slot& slot : Slots)
 					slot.Object.reset();
 				Slots.clear();
@@ -384,6 +430,53 @@ namespace rhi {
 		Table<SamplerHandle, VulkanSampler> m_Samplers;
 		Table<ShaderHandle, VulkanShaderModule> m_Shaders;
 		Table<PipelineHandle, VulkanPipeline> m_Pipelines;
+
+		// The pipeline cache - keyed by (state hash, vertex shader handle,
+		// fragment shader handle); a hit returns the cached pipeline
+		// (refcounted so create-once/destroy-once callers stay balanced).
+		// Entries evict when either shader dies or when
+		// InvalidatePipelines names the shader's AssetID.
+		struct PipelineCacheEntry
+		{
+			PipelineHandle Handle;
+			uint32_t RefCount = 0;
+		};
+		struct PipelineCacheKey
+		{
+			uint64_t StateHash = 0;
+			ShaderHandle VertexShader;
+			ShaderHandle FragmentShader;
+
+			bool operator==(const PipelineCacheKey& other) const
+			{
+				return StateHash == other.StateHash && VertexShader.Index == other.VertexShader.Index
+					&& VertexShader.Generation == other.VertexShader.Generation
+					&& FragmentShader.Index == other.FragmentShader.Index
+					&& FragmentShader.Generation == other.FragmentShader.Generation;
+			}
+		};
+		struct PipelineCacheKeyHash
+		{
+			size_t operator()(const PipelineCacheKey& k) const
+			{
+				size_t h = std::hash<uint64_t>{}(k.StateHash);
+				h ^= std::hash<uint32_t>{}(k.VertexShader.Index) + 0x9e3779b9 + (h << 6) + (h >> 2);
+				h ^= std::hash<uint32_t>{}(k.VertexShader.Generation) + 0x9e3779b9 + (h << 6) + (h >> 2);
+				h ^= std::hash<uint32_t>{}(k.FragmentShader.Index) + 0x9e3779b9 + (h << 6) + (h >> 2);
+				h ^= std::hash<uint32_t>{}(k.FragmentShader.Generation) + 0x9e3779b9 + (h << 6) + (h >> 2);
+				return h;
+			}
+		};
+		std::unordered_map<PipelineCacheKey, PipelineCacheEntry, PipelineCacheKeyHash> m_PipelineCache;
+		uint64_t HashPipelineStateDesc(const PipelineStateDesc& desc);
+		void EvictPipelineEntry(const PipelineCacheKey& key);
+		void CreatePipelineCache();
+		void SavePipelineCache();
+
+		// The on-disk driver pipeline cache
+		// (saved/cache/pipeline.bin, gated by
+		// r.shader.pipelineCacheFile).
+		VkPipelineCache m_VkPipelineCache = VK_NULL_HANDLE;
 		Table<CommandListHandle, VulkanCommandList> m_CommandLists;
 		Table<SwapchainHandle, VulkanSwapchain> m_Swapchains;
 

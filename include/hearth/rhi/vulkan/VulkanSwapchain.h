@@ -41,6 +41,16 @@ namespace TinyEngine {
 		// wouldn't be a problem.
 		void SetVsync(bool enabled);
 
+		// The submit thread never rebuilds - the out-of-date paths raise a
+		// rebuild REQUEST; the game thread consumes it (under the
+		// submit-idle park) at its next SwapBuffers, where the rebuild's RHI
+		// handle-table ops cannot race the game thread's own texture ops.
+		void RequestRebuild() { m_PendingRebuild.store(1u, std::memory_order_relaxed); }
+		bool ConsumeRebuildRequest() { return m_PendingRebuild.exchange(0u, std::memory_order_relaxed) != 0; }
+		// True while a SetVsync request is unconsumed (the apply may
+		// rebuild, so the game thread parks before it runs).
+		bool HasPendingVsync() const { return m_PendingVsync.load(std::memory_order_relaxed) < 2u; }
+
 		// Waits on the current frame's fence, then acquires the next swapchain
 		// image. OutOfDate means the swapchain came back out of date and had to
 		// be rebuilt, in which case the caller should skip drawing this frame
@@ -174,6 +184,9 @@ namespace TinyEngine {
 		std::atomic<uint32_t> m_PublishedHeight{ 0 };
 		// 0 = vsync off, 1 = vsync on, 2 = consumed (no pending request).
 		std::atomic<uint32_t> m_PendingVsync{ 2 };
+		// 0 = none, 1 = out-of-date rebuild requested (consumed on the game
+		// thread under the park).
+		std::atomic<uint32_t> m_PendingRebuild{ 0 };
 
 		// The image-available binary semaphore is per frame in flight (the
 		// acquire/present handshake). The CPU-side reuse of a frame's command

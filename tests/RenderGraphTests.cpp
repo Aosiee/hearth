@@ -63,8 +63,9 @@ namespace rg_tests {
 
 		rhi::SamplerHandle CreateSampler(const rhi::SamplerDesc&, const char*) override { return {}; }
 		void DestroySampler(rhi::SamplerHandle) override {}
-		rhi::ShaderHandle CreateShader(std::span<const uint32_t>, rhi::ShaderStage, const char*) override { return {}; }
+		rhi::ShaderHandle CreateShader(std::span<const uint32_t>, rhi::ShaderStage, const char*, const rhi::ShaderIdentity* = nullptr) override { return {}; }
 		void DestroyShader(rhi::ShaderHandle) override {}
+		void InvalidatePipelines(const AssetID&) override {}
 		rhi::PipelineHandle CreatePipeline(const rhi::PipelineStateDesc&, const char*) override { return {}; }
 		void DestroyPipeline(rhi::PipelineHandle) override {}
 

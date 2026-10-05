@@ -34,7 +34,10 @@ namespace TinyEngine {
 		// The only validation layer used. If it isn't present on this machine
 		// (no Vulkan SDK / LunarG layers installed), startup carries on
 		// without it rather than refusing to start, the same way the engine
-		// doesn't refuse to start without a debugger attached.
+		// doesn't refuse to start without a debugger attached. The whole
+		// debug-utils/validation machinery compiles out of TE_CONF_DIST
+		// builds (audit rows A4/A8).
+#if !defined(TE_CONF_DIST)
 		const char* g_ValidationLayerName = "VK_LAYER_KHRONOS_validation";
 
 		// Kept separate from the log itself (Log.h has no ring buffer, and
@@ -45,6 +48,7 @@ namespace TinyEngine {
 
 		void BufferValidationMessage(VkDebugUtilsMessageSeverityFlagBitsEXT severity, const char* message)
 		{
+#if !defined(TE_CONF_DIST)
 			const char* severityText = "INFO";
 			if (severity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
 				severityText = "ERROR";
@@ -53,11 +57,15 @@ namespace TinyEngine {
 
 			// T-F-C: the messenger fires on whichever thread made the call -
 			// the append serializes with the submit thread's frame writes.
+#if !defined(TE_CONF_DIST)
 			std::lock_guard lock(GpuFrameDebugInfoMutex());
 			std::vector<std::string>& messages = GetMutableGpuFrameDebugInfo().ValidationMessages;
 			messages.insert(messages.begin(), std::string("[") + severityText + "] " + message);
 			if (messages.size() > kMaxBufferedValidationMessages)
 				messages.resize(kMaxBufferedValidationMessages);
+#endif // !TE_CONF_DIST
+#endif // !TE_CONF_DIST
+			(void)severity; (void)message;
 		}
 
 		VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(
@@ -95,6 +103,7 @@ namespace TinyEngine {
 			// which is almost never what you want outside of a targeted test.
 			return VK_FALSE;
 		}
+#endif // !TE_CONF_DIST
 
 	}
 
@@ -107,8 +116,10 @@ namespace TinyEngine {
 		CreateInstance(windowForExtensionQuery);
 		volkLoadInstance(m_Instance);
 
+#if !defined(TE_CONF_DIST)
 		if (m_ValidationEnabled)
 			CreateDebugMessenger();
+#endif // !TE_CONF_DIST
 
 		PickPhysicalDevice();
 		CreateLogicalDevice();
@@ -211,8 +222,10 @@ namespace TinyEngine {
 		if (m_Device != VK_NULL_HANDLE)
 			vkDestroyDevice(m_Device, nullptr);
 
+#if !defined(TE_CONF_DIST)
 		if (m_DebugMessenger != VK_NULL_HANDLE)
 			vkDestroyDebugUtilsMessengerEXT(m_Instance, m_DebugMessenger, nullptr);
+#endif // !TE_CONF_DIST
 
 		if (m_Instance != VK_NULL_HANDLE)
 			vkDestroyInstance(m_Instance, nullptr);
@@ -220,6 +233,7 @@ namespace TinyEngine {
 
 	bool VulkanDevice::CheckValidationLayerSupport() const
 	{
+#if !defined(TE_CONF_DIST)
 		uint32_t layerCount = 0;
 		vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
 
@@ -231,6 +245,7 @@ namespace TinyEngine {
 			if (strcmp(layer.layerName, g_ValidationLayerName) == 0)
 				return true;
 		}
+#endif // !TE_CONF_DIST
 
 		return false;
 	}
@@ -274,6 +289,7 @@ namespace TinyEngine {
 		// validation messages raised by vkCreateInstance/vkDestroyInstance
 		// themselves are also caught, which the messenger object created
 		// afterwards would otherwise miss.
+#if !defined(TE_CONF_DIST)
 		VkDebugUtilsMessengerCreateInfoEXT messengerCreateInfo{};
 		if (m_ValidationEnabled)
 		{
@@ -295,12 +311,14 @@ namespace TinyEngine {
 
 			createInfo.pNext = &messengerCreateInfo;
 		}
+#endif // !TE_CONF_DIST
 
 		VK_CHECK(vkCreateInstance(&createInfo, nullptr, &m_Instance));
 
 		TE_CORE_INFO(LogVulkan, "Vulkan Instance Created (validation {0})", m_ValidationEnabled ? "enabled" : "disabled");
 	}
 
+#if !defined(TE_CONF_DIST)
 	void VulkanDevice::CreateDebugMessenger()
 	{
 		VkDebugUtilsMessengerCreateInfoEXT createInfo{};
@@ -314,6 +332,7 @@ namespace TinyEngine {
 
 		VK_CHECK(vkCreateDebugUtilsMessengerEXT(m_Instance, &createInfo, nullptr, &m_DebugMessenger));
 	}
+#endif // !TE_CONF_DIST
 
 	void VulkanDevice::PickPhysicalDevice()
 	{
@@ -733,6 +752,7 @@ namespace TinyEngine {
 
 	void VulkanDevice::SetObjectName(VkObjectType type, uint64_t handle, const std::string& name) const
 	{
+#if !defined(TE_CONF_DIST)
 		if (!m_ValidationEnabled || !vkSetDebugUtilsObjectNameEXT)
 			return;
 
@@ -743,10 +763,13 @@ namespace TinyEngine {
 		nameInfo.pObjectName = name.c_str();
 
 		vkSetDebugUtilsObjectNameEXT(m_Device, &nameInfo);
+#endif // !TE_CONF_DIST
+		(void)type; (void)handle; (void)name;
 	}
 
 	void VulkanDevice::CmdBeginDebugLabel(VkCommandBuffer commandBuffer, const std::string& name, const float colour[4])
 	{
+#if !defined(TE_CONF_DIST)
 		if (m_ValidationEnabled && vkCmdBeginDebugUtilsLabelEXT)
 		{
 			VkDebugUtilsLabelEXT label{};
@@ -783,10 +806,13 @@ namespace TinyEngine {
 			m_ScopeBeginStack[threadKey].push_back(slot);
 			m_ScopeNameStack[threadKey].push_back(name);
 		}
+#endif // !TE_CONF_DIST
+		(void)commandBuffer; (void)name; (void)colour;
 	}
 
 	void VulkanDevice::CmdEndDebugLabel(VkCommandBuffer commandBuffer)
 	{
+#if !defined(TE_CONF_DIST)
 		if (m_TimestampsSupported)
 		{
 			uint32_t frameIndex = GetRecordFrameIndex();
@@ -808,20 +834,28 @@ namespace TinyEngine {
 				std::string scopeName = m_ScopeNameStack[threadKey].back();
 				m_ScopeNameStack[threadKey].pop_back();
 
+#if !defined(TE_CONF_DIST)
 				uint32_t profilerFrame = TinyEngine::Profiler::Get().CurrentFrameIndex();
+#else
+				uint32_t profilerFrame = 0;
+#endif // !TE_CONF_DIST
 				m_RecordedScopes[threadKey].push_back({ scopeName, beginSlot, endSlot, profilerFrame });
 			}
 		}
 
 		if (m_ValidationEnabled && vkCmdEndDebugUtilsLabelEXT)
 			vkCmdEndDebugUtilsLabelEXT(commandBuffer);
+#endif // !TE_CONF_DIST
+		(void)commandBuffer;
 	}
 
 	void VulkanDevice::BeginProfilingFrame(uint32_t frameIndex, bool isMainWindow)
 	{
 		TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "BeginProfilingFrame frame index out of range!");
+#if !defined(TE_CONF_DIST)
 		GpuFrameDebugInfo& debugInfo = GetMutableGpuFrameDebugInfo();
 		std::lock_guard lock(GpuFrameDebugInfoMutex());
+#endif // !TE_CONF_DIST
 
 		uint32_t queryCount = m_NextQuerySlot[frameIndex].load(std::memory_order_relaxed);
 
@@ -840,6 +874,7 @@ namespace TinyEngine {
 
 			if (result == VK_SUCCESS)
 			{
+#if !defined(TE_CONF_DIST)
 				debugInfo.PassTimings.clear();
 				// The profiler's GPU lane: the tick pairs + the
 				// originating frame, in the device-ns domain (the viewer
@@ -855,22 +890,42 @@ namespace TinyEngine {
 						float ms = (float)((double)deltaTicks * m_TimestampPeriodNs / 1000000.0);
 						debugInfo.PassTimings.push_back({ scope.Name, ms });
 
+#if !defined(TE_CONF_DIST)
 						TinyEngine::Profiler::Get().GpuPassPair(0,
 							(uint64_t)((double)timestamps[scope.BeginQuery] * m_TimestampPeriodNs),
 							(uint64_t)((double)timestamps[scope.EndQuery] * m_TimestampPeriodNs),
 							scope.ProfilerFrameIndex, scope.Name.c_str());
+#endif // !TE_CONF_DIST
 					}
 				}
 
 				debugInfo.Available = true;
+#endif // !TE_CONF_DIST
 			}
 		}
 
+#if !defined(TE_CONF_DIST)
 		if (isMainWindow)
 		{
 			debugInfo.FrameInFlightIndex = frameIndex;
 			debugInfo.Barriers.clear();
+
+			// Fold the live VMA heap budgets into the debugger
+			// snapshot (the caller holds the fence, so the allocator's
+			// counters are quiesced for this frame slot).
+			VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+			vmaGetHeapBudgets(m_Allocator, budgets);
+			debugInfo.HeapBudgetCount = 0;
+			for (uint32_t heap = 0; heap < VK_MAX_MEMORY_HEAPS; heap++)
+			{
+				if (budgets[heap].budget == 0 && budgets[heap].usage == 0)
+					continue;
+				GpuHeapBudget& out = debugInfo.HeapBudgets[debugInfo.HeapBudgetCount++];
+				out.BytesUsed = budgets[heap].usage;
+				out.BytesBudget = budgets[heap].budget;
+			}
 		}
+#endif // !TE_CONF_DIST
 
 		m_NextQuerySlot[frameIndex].store(0, std::memory_order_relaxed);
 		for (uint32_t thread = 0; thread < m_RecordThreadCount; thread++)
