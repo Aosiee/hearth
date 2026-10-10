@@ -99,6 +99,12 @@ namespace TinyEngine {
 		// on, requesting VK_TRUE without the feature enabled is a validation error.
 		bool IsSamplerAnisotropySupported() const { return m_SamplerAnisotropySupported; }
 
+		// Non-solid polygon modes (VK_POLYGON_MODE_LINE - the wireframe debug
+		// view's pipeline) are an optional device feature too. Checked once
+		// at device creation and requested if available; requesting LINE
+		// without the feature enabled is VUID-...-polygonMode-01507.
+		bool IsFillModeNonSolidSupported() const { return m_FillModeNonSolidSupported; }
+
 		// Thin wrapper over vkSetDebugUtilsObjectNameEXT. Safe to call even when
 		// validation/debug utils aren't active, it just becomes a no-op, so callers
 		// don't need to guard every call site themselves. This is what makes a
@@ -216,7 +222,7 @@ namespace TinyEngine {
 
 		bool m_ValidationEnabled = false;
 		bool m_SamplerAnisotropySupported = false;
-
+		bool m_FillModeNonSolidSupported = false;
 		// GPU frame debugger timing.
 		// One query pool per frame slot (window slot * FramesInFlight), same
 		// reasoning as the command pools: reusing slot N is only safe once

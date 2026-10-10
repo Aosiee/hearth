@@ -52,6 +52,14 @@ namespace rhi {
 		Always,
 	};
 
+	// The rasterization polygon mode a pipeline declares (added for the
+	// wireframe debug view's line-rasterised pipeline).
+	enum class PolygonFillMode : uint8_t
+	{
+		Fill,
+		Line,
+	};
+
 	// A display name for a texture state (the GPU frame debugger's barrier
 	// list uses the graph's vocabulary, not the backend's layout names).
 	inline const char* TextureStateName(TextureState state)

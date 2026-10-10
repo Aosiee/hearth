@@ -53,6 +53,16 @@ namespace rhi {
 			return VK_COMPARE_OP_LESS;
 		}
 
+		VkPolygonMode ToVkPolygonMode(PolygonFillMode mode)
+		{
+			switch (mode)
+			{
+			case PolygonFillMode::Fill: return VK_POLYGON_MODE_FILL;
+			case PolygonFillMode::Line: return VK_POLYGON_MODE_LINE;
+			}
+			return VK_POLYGON_MODE_FILL;
+		}
+
 		VkFormat ToVkFormat(Format format)
 		{
 			switch (format)
@@ -1485,6 +1495,7 @@ namespace rhi {
 		uint32_t depthTest = desc.DepthTestEnable ? 1u : 0u;
 		uint32_t depthWrite = desc.DepthWriteEnable ? 1u : 0u;
 		uint32_t compareOp = (uint32_t)desc.DepthCompareOp;
+		uint32_t polygonMode = (uint32_t)desc.PolygonMode;
 		uint32_t colourFormat = (uint32_t)desc.ColorAttachmentFormat;
 		uint32_t depthFormat = (uint32_t)desc.DepthAttachmentFormat;
 		feed(&blend, sizeof(blend));
@@ -1492,6 +1503,7 @@ namespace rhi {
 		feed(&depthTest, sizeof(depthTest));
 		feed(&depthWrite, sizeof(depthWrite));
 		feed(&compareOp, sizeof(compareOp));
+		feed(&polygonMode, sizeof(polygonMode));
 		feed(&colourFormat, sizeof(colourFormat));
 		feed(&depthFormat, sizeof(depthFormat));
 		feed(&desc.PushConstantSize, sizeof(desc.PushConstantSize));
@@ -1534,6 +1546,7 @@ namespace rhi {
 		spec.DepthTestEnable = desc.DepthTestEnable;
 		spec.DepthWriteEnable = desc.DepthWriteEnable;
 		spec.DepthCompareOp = ToVkCompareOp(desc.DepthCompareOp);
+		spec.PolygonMode = ToVkPolygonMode(desc.PolygonMode);
 		spec.ColorAttachmentFormat = ToVkFormat(desc.ColorAttachmentFormat);
 		spec.DepthAttachmentFormat = ToVkFormat(desc.DepthAttachmentFormat);
 		spec.PushConstantSize = desc.PushConstantSize;

@@ -61,6 +61,7 @@ namespace rhi {
 		bool     DepthTestEnable = false;
 		bool     DepthWriteEnable = false;
 		CompareOp DepthCompareOp = CompareOp::Less;
+		PolygonFillMode PolygonMode = PolygonFillMode::Fill;
 		Format   ColorAttachmentFormat = Format::Undefined;
 		Format   DepthAttachmentFormat = Format::Undefined;
 

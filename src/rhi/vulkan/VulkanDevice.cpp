@@ -462,14 +462,19 @@ namespace TinyEngine {
 		// anisotropy limit is just always queryable), so it has to actually be
 		// checked and requested rather than assumed on, or every sampler
 		// created with anisotropyEnable = VK_TRUE is a validation error.
+		// Non-solid polygon modes (the wireframe debug view's LINE pipeline)
+		// are the same shape: checked + requested here, or requesting
+		// VK_POLYGON_MODE_LINE is VUID-...-polygonMode-01507.
 		VkPhysicalDeviceFeatures supportedFeatures;
 		vkGetPhysicalDeviceFeatures(m_PhysicalDevice, &supportedFeatures);
 		m_SamplerAnisotropySupported = supportedFeatures.samplerAnisotropy == VK_TRUE;
+		m_FillModeNonSolidSupported = supportedFeatures.fillModeNonSolid == VK_TRUE;
 
 		VkPhysicalDeviceFeatures2 features2{};
 		features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 		features2.pNext = &vulkan12Features;
 		features2.features.samplerAnisotropy = m_SamplerAnisotropySupported ? VK_TRUE : VK_FALSE;
+		features2.features.fillModeNonSolid = m_FillModeNonSolidSupported ? VK_TRUE : VK_FALSE;
 
 		const char* deviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 		VkDeviceCreateInfo createInfo{};

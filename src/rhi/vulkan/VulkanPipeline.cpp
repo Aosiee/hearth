@@ -73,7 +73,7 @@ namespace TinyEngine {
 
 		VkPipelineRasterizationStateCreateInfo rasterizationState{};
 		rasterizationState.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-		rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
+		rasterizationState.polygonMode = spec.PolygonMode;
 		// No culling: this is a flat, camera facing 2D quad test, not worth
 		// tying correctness to getting winding order exactly right.
 		rasterizationState.cullMode = VK_CULL_MODE_NONE;

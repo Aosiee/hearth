@@ -75,6 +75,10 @@ namespace TinyEngine {
 		bool DepthWriteEnable = false;
 		VkCompareOp DepthCompareOp = VK_COMPARE_OP_LESS;
 		VkFormat DepthAttachmentFormat = VK_FORMAT_UNDEFINED;
+
+		// FILL by default; the wireframe debug view's pipeline declares
+		// LINE (baked at creation - fixed-function state).
+		VkPolygonMode PolygonMode = VK_POLYGON_MODE_FILL;
 	};
 
 	class VulkanPipeline
