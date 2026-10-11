@@ -117,10 +117,15 @@ namespace TinyEngine {
 			blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 		}
 
+		// One blend state per colour attachment (the G-buffer pass is count
+		// 4; single-colour pipelines stay count 1).
+		const uint32_t colourCount = spec.ColorAttachmentCount;
+		std::vector<VkPipelineColorBlendAttachmentState> blendAttachments(colourCount, blendAttachment);
+
 		VkPipelineColorBlendStateCreateInfo colorBlendState{};
 		colorBlendState.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-		colorBlendState.attachmentCount = 1;
-		colorBlendState.pAttachments = &blendAttachment;
+		colorBlendState.attachmentCount = colourCount;
+		colorBlendState.pAttachments = blendAttachments.data();
 
 		VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 		VkPipelineDynamicStateCreateInfo dynamicState{};
@@ -133,8 +138,8 @@ namespace TinyEngine {
 		// is core in 1.3).
 		VkPipelineRenderingCreateInfo renderingCreateInfo{};
 		renderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-		renderingCreateInfo.colorAttachmentCount = 1;
-		renderingCreateInfo.pColorAttachmentFormats = &spec.ColorAttachmentFormat;
+		renderingCreateInfo.colorAttachmentCount = spec.ColorAttachmentCount;
+		renderingCreateInfo.pColorAttachmentFormats = spec.ColorAttachmentFormats;
 		renderingCreateInfo.depthAttachmentFormat = spec.DepthAttachmentFormat;
 
 		VkGraphicsPipelineCreateInfo pipelineCreateInfo{};

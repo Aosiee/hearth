@@ -18,10 +18,16 @@ namespace rhi {
 
 	// One dynamic-rendering attachment set (the backend uses dynamic
 	// rendering, so there are no render-pass objects).
-	// The render area comes from the colour attachment's size.
+	// The render area comes from the first colour attachment's size.
+	// The colour side is an ARRAY (MRT for the
+	// G-buffer pass); LoadColor still clears every colour attachment with
+	// the device's single clear colour (no per-attachment clear values).
 	struct AttachmentDesc
 	{
-		TextureHandle Color;               // invalid = no colour attachment
+		static constexpr uint32_t kMaxColorAttachments = 8;
+
+		TextureHandle Colors[kMaxColorAttachments] = {}; // invalid = absent
+		uint32_t ColorCount = 1;
 		TextureHandle Depth;               // invalid = no depth attachment
 		bool   DepthReadOnly = false;
 		bool   LoadColor = true;           // true = clear (the clear value comes from the Device)

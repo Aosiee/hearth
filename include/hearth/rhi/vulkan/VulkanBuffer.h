@@ -62,6 +62,12 @@ namespace TinyEngine {
 		VkDeviceSize GetSize() const { return m_Size; }
 		VmaAllocation GetAllocation() const { return m_Allocation; }
 
+		// The buffer's slot in the bindless storage-buffer binding (1).
+		// ~0u = none (the DestroyBuffer path passes it to the retire
+		// queue, which then skips the tombstone).
+		void SetBindlessIndex(uint32_t index) { m_BindlessIndex = index; }
+		uint32_t GetBindlessIndex() const { return m_BindlessIndex; }
+
 	private:
 		VulkanDevice* m_Device = nullptr;
 		VkBuffer m_Buffer = VK_NULL_HANDLE;
@@ -69,6 +75,7 @@ namespace TinyEngine {
 		VkDeviceSize m_Size = 0;
 		void* m_MappedData = nullptr;
 		bool m_External = false;
+		uint32_t m_BindlessIndex = ~0u;
 	};
 
 }

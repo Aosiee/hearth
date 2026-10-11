@@ -152,13 +152,20 @@ namespace rhi {
 
 		uint32_t AllocateBindlessTextureIndex();
 		void WriteTextureDescriptor(uint32_t index, VkImageView imageView, VkSampler sampler, VkImageLayout layout);
+		// The buffer side of the bindless set (binding 1, STORAGE_BUFFER) -
+		// the per-frame light/view SSBO and the per-material SSBO are its
+		// first consumers. The same contract as textures: write once
+		// through the log, recycle the index only after every slot applied
+		// its tombstone.
+		uint32_t AllocateBindlessBufferIndex();
+		void WriteBufferDescriptor(uint32_t index, VkBuffer buffer);
 		// P-F: applies every logged write with Seq > this slot's last
 		// applied seq to the slot's set in one vkUpdateDescriptorSets batch
 		// (idempotent; called from VulkanCommandList::BindGlobalSet).
 		void ApplyDescriptorLog(uint32_t slot);
 		void QueueTextureForDestruction(VkImage image, VmaAllocation allocation,
 			VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex);
-		void QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation);
+		void QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex = ~0u);
 		void QueuePipelineForDestruction(VkPipeline pipeline, VkPipelineLayout layout);
 		void QueueShaderForDestruction(VkShaderModule shader);
 		void QueueSamplerForDestruction(VkSampler sampler);
@@ -267,6 +274,11 @@ namespace rhi {
 		// the current NVIDIA driver).
 		void CreateNullTexture();
 		void DestroyNullTexture();
+		// The tombstone target for a freed buffer slot (a real 16-byte
+		// buffer - nulling the descriptor needs the nullDescriptor
+		// feature, which is not enabled).
+		void CreateNullBuffer();
+		void DestroyNullBuffer();
 
 		// P-F: the descriptor write log. All writes - creation, rewrite,
 		// tombstone - append here; nothing writes a set directly. A slot's
@@ -279,6 +291,7 @@ namespace rhi {
 			Kind           Kind_ = Kind::Texture;
 			uint64_t       Seq = 0;
 			uint32_t       Index = 0; // array element in the bindless binding
+			uint32_t       Binding = 0; // the bindless binding (0 = textures, 1 = buffers)
 			VkImageView    ImageView = VK_NULL_HANDLE;
 			VkSampler      Sampler = VK_NULL_HANDLE;
 			VkImageLayout  ImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -492,6 +505,9 @@ namespace rhi {
 		VmaAllocation m_NullTextureAllocation = VK_NULL_HANDLE;
 		VkImageView m_NullTextureView = VK_NULL_HANDLE;
 		VkSampler m_NullTextureSampler = VK_NULL_HANDLE;
+		// The buffer-side null descriptor (16 bytes).
+		VkBuffer m_NullBuffer = VK_NULL_HANDLE;
+		VmaAllocation m_NullBufferAllocation = VK_NULL_HANDLE;
 
 		VkDescriptorSetLayout m_GlobalSetLayout = VK_NULL_HANDLE;
 		VkDescriptorPool m_GlobalSetPool = VK_NULL_HANDLE;
@@ -511,6 +527,11 @@ namespace rhi {
 
 		std::vector<uint32_t> m_FreeBindlessIndices;
 		uint32_t m_NextBindlessIndex = 0;
+		// The buffer binding's own free/reuse lists (the two bindings'
+		// index spaces are separate).
+		std::vector<std::pair<uint32_t, uint64_t>> m_PendingBufferIndexReuse;
+		std::vector<uint32_t> m_FreeBindlessBufferIndices;
+		uint32_t m_NextBindlessBufferIndex = 0;
 		std::vector<RetireEntry> m_RetireQueue;
 
 		QueueHandle m_GraphicsQueue;

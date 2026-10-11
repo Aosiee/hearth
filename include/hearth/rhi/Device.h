@@ -62,7 +62,11 @@ namespace rhi {
 		bool     DepthWriteEnable = false;
 		CompareOp DepthCompareOp = CompareOp::Less;
 		PolygonFillMode PolygonMode = PolygonFillMode::Fill;
-		Format   ColorAttachmentFormat = Format::Undefined;
+		// An ARRAY of colour attachment formats (MRT for the G-buffer
+		// pass); single-colour pipelines set count 1.
+		static constexpr uint32_t kMaxColorAttachments = 8;
+		Format   ColorAttachmentFormats[kMaxColorAttachments] = {};
+		uint32_t ColorAttachmentCount = 1;
 		Format   DepthAttachmentFormat = Format::Undefined;
 
 		uint32_t PushConstantSize = 0;

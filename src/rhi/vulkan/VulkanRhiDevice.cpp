@@ -70,8 +70,12 @@ namespace rhi {
 			case Format::B8G8R8A8_UNORM:     return VK_FORMAT_B8G8R8A8_UNORM;
 			case Format::B8G8R8A8_SRGB:      return VK_FORMAT_B8G8R8A8_SRGB;
 			case Format::R8G8B8A8_UNORM:     return VK_FORMAT_R8G8B8A8_UNORM;
+			case Format::R8G8B8A8_SRGB:      return VK_FORMAT_R8G8B8A8_SRGB;
 			case Format::R8_UNORM:           return VK_FORMAT_R8_UNORM;
 			case Format::D32_SFLOAT:         return VK_FORMAT_D32_SFLOAT;
+			case Format::R16G16_UNORM:       return VK_FORMAT_R16G16_UNORM;
+			case Format::R16G16B16A16_SFLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
+			case Format::R16G16_SFLOAT:      return VK_FORMAT_R16G16_SFLOAT;
 			case Format::R32G32B32_SFLOAT:   return VK_FORMAT_R32G32B32_SFLOAT;
 			case Format::R32G32B32A32_SFLOAT: return VK_FORMAT_R32G32B32A32_SFLOAT;
 			case Format::R32G32_SFLOAT:      return VK_FORMAT_R32G32_SFLOAT;
@@ -234,26 +238,32 @@ namespace rhi {
 	{
 		VkRenderingInfo renderingInfo{};
 		renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-		VkRenderingAttachmentInfo colourAttachment{};
+		VkRenderingAttachmentInfo colourAttachments[AttachmentDesc::kMaxColorAttachments]{};
+		uint32_t colourCount = 0;
 		VkRenderingAttachmentInfo depthAttachment{};
+		bool hasDepth = false;
+		VkExtent2D renderArea{};
 
 		for (const AttachmentDesc& attachment : attachments)
 		{
-			if (IsValid(attachment.Color))
+			for (uint32_t i = 0; i < attachment.ColorCount; ++i)
 			{
+				if (!IsValid(attachment.Colors[i]))
+					continue;
+				VkRenderingAttachmentInfo& colourAttachment = colourAttachments[colourCount++];
 				colourAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-				colourAttachment.imageView = m_Device->GetTextureView(attachment.Color);
+				colourAttachment.imageView = m_Device->GetTextureView(attachment.Colors[i]);
 				colourAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 				colourAttachment.loadOp = attachment.LoadColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 				colourAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 				const float* clear = m_Device->GetClearColour();
 				colourAttachment.clearValue.color = { { clear[0], clear[1], clear[2], clear[3] } };
-				renderingInfo.colorAttachmentCount = 1;
-				renderingInfo.pColorAttachments = &colourAttachment;
-				renderingInfo.renderArea.extent = m_Device->GetTextureSize(attachment.Color);
+				if (renderArea.width == 0)
+					renderArea = m_Device->GetTextureSize(attachment.Colors[i]);
 			}
 			if (IsValid(attachment.Depth))
 			{
+				hasDepth = true;
 				depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
 				depthAttachment.imageView = m_Device->GetTextureView(attachment.Depth);
 				depthAttachment.imageLayout = attachment.DepthReadOnly
@@ -262,9 +272,13 @@ namespace rhi {
 				depthAttachment.loadOp = attachment.LoadDepth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 				depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 				depthAttachment.clearValue.depthStencil = { 1.0f, 0 };
-				renderingInfo.pDepthAttachment = &depthAttachment;
 			}
 		}
+		renderingInfo.colorAttachmentCount = colourCount;
+		renderingInfo.pColorAttachments = colourAttachments;
+		renderingInfo.pDepthAttachment = hasDepth ? &depthAttachment : nullptr;
+		// The render area comes from the first colour attachment's size.
+		renderingInfo.renderArea.extent = renderArea;
 		vkCmdBeginRendering(m_CommandBuffer, &renderingInfo);
 	}
 
@@ -483,6 +497,7 @@ namespace rhi {
 		CreateGlobalBindlessSet();
 		CreateFixedSamplers();
 		CreateNullTexture();
+		CreateNullBuffer();
 		CreatePipelineCache();
 	}
 
@@ -697,6 +712,32 @@ namespace rhi {
 		m_NullTextureAllocation = VK_NULL_HANDLE;
 	}
 
+	void VulkanRhiDevice::CreateNullBuffer()
+	{
+		// The buffer-side tombstone target (16 bytes; storage-buffer
+		// descriptors need a real, live buffer).
+		VkBufferCreateInfo bufferInfo{};
+		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferInfo.size = 16;
+		bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+
+		VulkanCheckResult(vmaCreateBuffer(m_Vulkan.GetAllocator(), &bufferInfo, &allocInfo,
+			&m_NullBuffer, &m_NullBufferAllocation, nullptr), "vmaCreateBuffer", __FILE__, __LINE__);
+		m_Vulkan.SetObjectName(VK_OBJECT_TYPE_BUFFER, (uint64_t)m_NullBuffer, "Bindless Null Buffer");
+	}
+
+	void VulkanRhiDevice::DestroyNullBuffer()
+	{
+		if (m_NullBuffer != VK_NULL_HANDLE)
+			vmaDestroyBuffer(m_Vulkan.GetAllocator(), m_NullBuffer, m_NullBufferAllocation);
+		m_NullBuffer = VK_NULL_HANDLE;
+		m_NullBufferAllocation = VK_NULL_HANDLE;
+	}
+
 	void VulkanRhiDevice::ShutdownDevice()
 	{
 		if (!m_Initialized)
@@ -749,6 +790,7 @@ namespace rhi {
 		m_Buffers.Clear();
 		DrainRetireQueueUnconditional();
 		DestroyGlobalBindlessSet();
+		DestroyNullBuffer();
 		DestroyNullTexture();
 		// The fixed samplers are device-owned (never in a retire entry).
 		if (m_FixedSamplerLinear != VK_NULL_HANDLE)
@@ -917,6 +959,48 @@ namespace rhi {
 		m_DescriptorWriteLog.push_back(entry);
 	}
 
+	uint32_t VulkanRhiDevice::AllocateBindlessBufferIndex()
+	{
+		std::lock_guard lock(m_DescriptorLogMutex);
+
+		uint32_t index;
+		if (!m_FreeBindlessBufferIndices.empty())
+		{
+			index = m_FreeBindlessBufferIndices.back();
+			m_FreeBindlessBufferIndices.pop_back();
+
+			// A recycled index's old entries (its tombstone, and anything
+			// else) are superseded by the new owner's write - drop them so
+			// the log stays bounded per index (the texture-side precedent).
+			for (auto it = m_DescriptorWriteLog.begin(); it != m_DescriptorWriteLog.end();)
+			{
+				if (it->Index == index && it->Binding == 1)
+					it = m_DescriptorWriteLog.erase(it);
+				else
+					++it;
+			}
+		}
+		else
+		{
+			TE_CORE_ASSERT(m_NextBindlessBufferIndex < kBindlessBuffers, "bindless buffer array exhausted");
+			index = m_NextBindlessBufferIndex++;
+		}
+		return index;
+	}
+
+	void VulkanRhiDevice::WriteBufferDescriptor(uint32_t index, VkBuffer buffer)
+	{
+		DescriptorWriteLogEntry entry;
+		entry.Kind_ = DescriptorWriteLogEntry::Kind::Buffer;
+		entry.Binding = 1;
+		entry.Index = index;
+		entry.Buffer = buffer;
+
+		std::lock_guard lock(m_DescriptorLogMutex);
+		entry.Seq = m_NextDescriptorSeq++;
+		m_DescriptorWriteLog.push_back(entry);
+	}
+
 	void VulkanRhiDevice::ApplyDescriptorLog(uint32_t slot)
 	{
 		TE_CORE_ASSERT(slot < VulkanDevice::TotalFrameSlots, "descriptor apply with an out-of-range frame slot");
@@ -929,8 +1013,10 @@ namespace rhi {
 		// already in log order, seq ascending).
 		std::vector<VkWriteDescriptorSet> writes;
 		std::vector<VkDescriptorImageInfo> imageInfos;
+		std::vector<VkDescriptorBufferInfo> bufferInfos;
 		writes.reserve(m_DescriptorWriteLog.size());
 		imageInfos.reserve(m_DescriptorWriteLog.size());
+		bufferInfos.reserve(m_DescriptorWriteLog.size());
 
 		uint64_t maxSeq = lastApplied;
 		for (const DescriptorWriteLogEntry& entry : m_DescriptorWriteLog)
@@ -941,14 +1027,26 @@ namespace rhi {
 			VkWriteDescriptorSet write{};
 			write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 			write.dstSet = m_GlobalSets[slot];
-			write.dstBinding = 0;
+			write.dstBinding = entry.Binding;
 			write.dstArrayElement = entry.Index;
 			write.descriptorCount = 1;
 
 			if (entry.Kind_ == DescriptorWriteLogEntry::Kind::Buffer)
 			{
-				// Reserved: the storage-buffer binding is not written by any
-				// current path (P-F covers the schema for its future user).
+				// The binding-1 storage-buffer side. A tombstone entry for a
+				// freed buffer slot carries the null buffer (a real
+				// descriptor - nulling the slot needs the nullDescriptor
+				// feature, which is not enabled).
+				VkDescriptorBufferInfo bufferInfo{};
+				bufferInfo.buffer = entry.Buffer;
+				bufferInfo.offset = 0;
+				bufferInfo.range = VK_WHOLE_SIZE;
+				bufferInfos.push_back(bufferInfo);
+
+				write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+				write.pBufferInfo = &bufferInfos.back();
+				writes.push_back(write);
+				maxSeq = std::max(maxSeq, entry.Seq);
 				continue;
 			}
 
@@ -1018,6 +1116,21 @@ namespace rhi {
 			write++;
 		}
 		m_PendingIndexReuse.resize(write);
+
+		// The buffer binding's own pending list.
+		write = 0;
+		for (size_t i = 0; i < m_PendingBufferIndexReuse.size(); i++)
+		{
+			if (m_PendingBufferIndexReuse[i].second <= floor)
+			{
+				m_FreeBindlessBufferIndices.push_back(m_PendingBufferIndexReuse[i].first);
+				continue;
+			}
+			if (write != i)
+				m_PendingBufferIndexReuse[write] = m_PendingBufferIndexReuse[i];
+			write++;
+		}
+		m_PendingBufferIndexReuse.resize(write);
 	}
 
 	void VulkanRhiDevice::QueueTextureForDestruction(VkImage image, VmaAllocation allocation,
@@ -1055,12 +1168,31 @@ namespace rhi {
 		QueueRetire(std::move(entry));
 	}
 
-	void VulkanRhiDevice::QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation)
+	void VulkanRhiDevice::QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex)
 	{
 		RetireEntry entry;
 		entry.Kind_ = RetireEntry::Kind::Buffer;
 		entry.Buffer = buffer;
 		entry.Allocation = allocation;
+		entry.BindlessIndex = bindlessIndex;
+		entry.HasBindlessIndex = bindlessIndex < kBindlessBuffers;
+
+		// The buffer slot's tombstone re-points the descriptor at the
+		// 16-byte null buffer (a REAL descriptor); the index recycles only
+		// after every slot applied it - the texture side's own contract.
+		if (entry.HasBindlessIndex)
+		{
+			DescriptorWriteLogEntry tombstone;
+			tombstone.Kind_ = DescriptorWriteLogEntry::Kind::Buffer;
+			tombstone.Binding = 1;
+			tombstone.Index = bindlessIndex;
+			tombstone.Buffer = m_NullBuffer;
+			std::lock_guard lock(m_DescriptorLogMutex);
+			tombstone.Seq = m_NextDescriptorSeq++;
+			m_DescriptorWriteLog.push_back(tombstone);
+			entry.TombstoneSeq = tombstone.Seq;
+		}
+
 		QueueRetire(std::move(entry));
 	}
 
@@ -1148,18 +1280,30 @@ namespace rhi {
 			// freed view, and the min-lastApplied GC floor never advances
 			// while any slot is idle). Drop them; the tombstone stays to
 			// clear the slots.
+			const uint32_t binding = entry.Kind_ == RetireEntry::Kind::Buffer ? 1u : 0u;
 			for (auto it = m_DescriptorWriteLog.begin(); it != m_DescriptorWriteLog.end();)
 			{
-				if (it->Index == entry.BindlessIndex && it->Kind_ != DescriptorWriteLogEntry::Kind::Tombstone)
+				if (it->Index == entry.BindlessIndex && it->Binding == binding && it->Kind_ != DescriptorWriteLogEntry::Kind::Tombstone)
 					it = m_DescriptorWriteLog.erase(it);
 				else
 					++it;
 			}
 
-			if (entry.TombstoneSeq == 0 || entry.TombstoneSeq <= MinLastAppliedSeq())
-				m_FreeBindlessIndices.push_back(entry.BindlessIndex);
+			const bool recycled = entry.TombstoneSeq == 0 || entry.TombstoneSeq <= MinLastAppliedSeq();
+			if (entry.Kind_ == RetireEntry::Kind::Buffer)
+			{
+				if (recycled)
+					m_FreeBindlessBufferIndices.push_back(entry.BindlessIndex);
+				else
+					m_PendingBufferIndexReuse.emplace_back(entry.BindlessIndex, entry.TombstoneSeq);
+			}
 			else
-				m_PendingIndexReuse.emplace_back(entry.BindlessIndex, entry.TombstoneSeq);
+			{
+				if (recycled)
+					m_FreeBindlessIndices.push_back(entry.BindlessIndex);
+				else
+					m_PendingIndexReuse.emplace_back(entry.BindlessIndex, entry.TombstoneSeq);
+			}
 		}
 	}
 
@@ -1239,7 +1383,7 @@ namespace rhi {
 			if (buffer->IsExternal())
 				buffer->Shutdown(); // slot release only - the mesh owns the VkBuffer
 			else
-				QueueBufferForDestruction(buffer->GetHandle(), buffer->GetAllocation());
+				QueueBufferForDestruction(buffer->GetHandle(), buffer->GetAllocation(), buffer->GetBindlessIndex());
 		}
 		// Hoisted out of the assert: the Release is a real side effect and
 		// must run in every config (in release/shipping the assert argument
@@ -1496,7 +1640,7 @@ namespace rhi {
 		uint32_t depthWrite = desc.DepthWriteEnable ? 1u : 0u;
 		uint32_t compareOp = (uint32_t)desc.DepthCompareOp;
 		uint32_t polygonMode = (uint32_t)desc.PolygonMode;
-		uint32_t colourFormat = (uint32_t)desc.ColorAttachmentFormat;
+		uint32_t colourCount = desc.ColorAttachmentCount;
 		uint32_t depthFormat = (uint32_t)desc.DepthAttachmentFormat;
 		feed(&blend, sizeof(blend));
 		feed(&preserveAlpha, sizeof(preserveAlpha));
@@ -1504,7 +1648,12 @@ namespace rhi {
 		feed(&depthWrite, sizeof(depthWrite));
 		feed(&compareOp, sizeof(compareOp));
 		feed(&polygonMode, sizeof(polygonMode));
-		feed(&colourFormat, sizeof(colourFormat));
+		feed(&colourCount, sizeof(colourCount));
+		for (uint32_t i = 0; i < desc.ColorAttachmentCount; ++i)
+		{
+			uint32_t colourFormat = (uint32_t)desc.ColorAttachmentFormats[i];
+			feed(&colourFormat, sizeof(colourFormat));
+		}
 		feed(&depthFormat, sizeof(depthFormat));
 		feed(&desc.PushConstantSize, sizeof(desc.PushConstantSize));
 		feed(&desc.PushConstantStages, sizeof(desc.PushConstantStages));
@@ -1547,7 +1696,11 @@ namespace rhi {
 		spec.DepthWriteEnable = desc.DepthWriteEnable;
 		spec.DepthCompareOp = ToVkCompareOp(desc.DepthCompareOp);
 		spec.PolygonMode = ToVkPolygonMode(desc.PolygonMode);
-		spec.ColorAttachmentFormat = ToVkFormat(desc.ColorAttachmentFormat);
+		TE_CORE_ASSERT(desc.ColorAttachmentCount <= PipelineStateDesc::kMaxColorAttachments,
+			"pipeline colour-attachment count over the RHI maximum");
+		spec.ColorAttachmentCount = desc.ColorAttachmentCount;
+		for (uint32_t i = 0; i < desc.ColorAttachmentCount; ++i)
+			spec.ColorAttachmentFormats[i] = ToVkFormat(desc.ColorAttachmentFormats[i]);
 		spec.DepthAttachmentFormat = ToVkFormat(desc.DepthAttachmentFormat);
 		spec.PushConstantSize = desc.PushConstantSize;
 		spec.PushConstantStages = desc.PushConstantStages;

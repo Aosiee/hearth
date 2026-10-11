@@ -48,7 +48,8 @@ namespace TinyEngine {
 		uint32_t PushConstantSize = 0;
 		VkShaderStageFlags PushConstantStages = VK_SHADER_STAGE_VERTEX_BIT;
 
-		VkFormat ColorAttachmentFormat = VK_FORMAT_UNDEFINED;
+		VkFormat ColorAttachmentFormats[8] = {};
+		uint32_t ColorAttachmentCount = 1;
 		bool EnableBlend = true;
 
 		// When true, the alpha channel is
