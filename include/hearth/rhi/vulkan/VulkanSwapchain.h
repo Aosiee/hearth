@@ -121,6 +121,12 @@ namespace TinyEngine {
 		VkImageView GetDepthImageView() const { return m_DepthImageView; }
 		static VkFormat GetDepthFormat() { return kSharedDepthFormat; }
 
+		// The swapchain's fixed colour format (ChooseSurfaceFormat
+		// prefers B8G8R8A8_UNORM - the same format the framebuffer spec
+		// defaults to, which is what lets the renderers' pipelines stay
+		// valid for both target kinds).
+		static VkFormat GetColourFormat() { return VK_FORMAT_B8G8R8A8_UNORM; }
+
 	private:
 		void CreateSurface(GLFWwindow* window);
 		void CreateSwapchain(uint32_t width, uint32_t height);
