@@ -95,9 +95,11 @@ namespace TinyEngine {
 		blendAttachment.blendEnable = spec.EnableBlend ? VK_TRUE : VK_FALSE;
 		if (spec.EnableBlend)
 		{
-			// The standard SRC_ALPHA / ONE_MINUS_SRC_ALPHA blend.
-			blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-			blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+			// The colour factors come from the spec (alpha blend by default;
+			// the PBR lighting passes pass One/One for additive accumulation
+			// into SceneColor).
+			blendAttachment.srcColorBlendFactor = spec.ColorBlendSrc;
+			blendAttachment.dstColorBlendFactor = spec.ColorBlendDst;
 			blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
 			if (spec.PreserveDestinationAlpha)
 			{

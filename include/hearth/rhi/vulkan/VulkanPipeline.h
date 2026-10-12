@@ -51,6 +51,10 @@ namespace TinyEngine {
 		VkFormat ColorAttachmentFormats[8] = {};
 		uint32_t ColorAttachmentCount = 1;
 		bool EnableBlend = true;
+		// The colour-blend factors (mapped from rhi::BlendFactor in
+		// VulkanRhiDevice::CreatePipeline; default = the classic alpha blend).
+		VkBlendFactor ColorBlendSrc = VK_BLEND_FACTOR_SRC_ALPHA;
+		VkBlendFactor ColorBlendDst = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
 
 		// When true, the alpha channel is
 		// blended with (ZERO, ONE) instead of the default (ONE, ZERO), i.e.

@@ -65,6 +65,17 @@ namespace rhi {
 		Line,
 	};
 
+	// The colour-blend factors a pipeline can declare (added for the PBR
+	// lighting passes' additive SceneColor accumulation; extended on demand).
+	// AlphaBlend = SrcAlpha/OneMinusSrcAlpha, Additive = One/One.
+	enum class BlendFactor : uint8_t
+	{
+		Zero,
+		One,
+		SrcAlpha,
+		OneMinusSrcAlpha,
+	};
+
 	// A display name for a texture state (the GPU frame debugger's barrier
 	// list uses the graph's vocabulary, not the backend's layout names).
 	inline const char* TextureStateName(TextureState state)

@@ -57,6 +57,12 @@ namespace rhi {
 		std::span<const Attribute> VertexAttributes;
 
 		bool     EnableBlend = true;
+		// The colour-blend factors when EnableBlend is true. The default is
+		// the classic SrcAlpha/OneMinusSrcAlpha (every pre-existing pipeline
+		// keeps its behaviour); the PBR lighting passes set One/One for
+		// additive SceneColor accumulation.
+		BlendFactor ColorBlendSrc = BlendFactor::SrcAlpha;
+		BlendFactor ColorBlendDst = BlendFactor::OneMinusSrcAlpha;
 		bool     PreserveDestinationAlpha = false;
 		bool     DepthTestEnable = false;
 		bool     DepthWriteEnable = false;

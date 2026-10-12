@@ -63,6 +63,18 @@ namespace rhi {
 			return VK_POLYGON_MODE_FILL;
 		}
 
+		VkBlendFactor ToVkBlendFactor(BlendFactor factor)
+		{
+			switch (factor)
+			{
+			case BlendFactor::Zero:             return VK_BLEND_FACTOR_ZERO;
+			case BlendFactor::One:              return VK_BLEND_FACTOR_ONE;
+			case BlendFactor::SrcAlpha:         return VK_BLEND_FACTOR_SRC_ALPHA;
+			case BlendFactor::OneMinusSrcAlpha: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+			}
+			return VK_BLEND_FACTOR_SRC_ALPHA;
+		}
+
 		VkFormat ToVkFormat(Format format)
 		{
 			switch (format)
@@ -1664,6 +1676,8 @@ namespace rhi {
 			feed(&offset, sizeof(offset));
 		}
 		uint32_t blend = desc.EnableBlend ? 1u : 0u;
+		uint32_t blendSrc = (uint32_t)desc.ColorBlendSrc;
+		uint32_t blendDst = (uint32_t)desc.ColorBlendDst;
 		uint32_t preserveAlpha = desc.PreserveDestinationAlpha ? 1u : 0u;
 		uint32_t depthTest = desc.DepthTestEnable ? 1u : 0u;
 		uint32_t depthWrite = desc.DepthWriteEnable ? 1u : 0u;
@@ -1672,6 +1686,8 @@ namespace rhi {
 		uint32_t colourCount = desc.ColorAttachmentCount;
 		uint32_t depthFormat = (uint32_t)desc.DepthAttachmentFormat;
 		feed(&blend, sizeof(blend));
+		feed(&blendSrc, sizeof(blendSrc));
+		feed(&blendDst, sizeof(blendDst));
 		feed(&preserveAlpha, sizeof(preserveAlpha));
 		feed(&depthTest, sizeof(depthTest));
 		feed(&depthWrite, sizeof(depthWrite));
@@ -1720,6 +1736,8 @@ namespace rhi {
 		for (const auto& attribute : desc.VertexAttributes)
 			spec.VertexAttributes.push_back({ attribute.Location, ToVkFormat(attribute.PixelFormat), attribute.Offset });
 		spec.EnableBlend = desc.EnableBlend;
+		spec.ColorBlendSrc = ToVkBlendFactor(desc.ColorBlendSrc);
+		spec.ColorBlendDst = ToVkBlendFactor(desc.ColorBlendDst);
 		spec.PreserveDestinationAlpha = desc.PreserveDestinationAlpha;
 		spec.DepthTestEnable = desc.DepthTestEnable;
 		spec.DepthWriteEnable = desc.DepthWriteEnable;
