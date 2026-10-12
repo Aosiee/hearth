@@ -275,7 +275,10 @@ namespace TinyEngine {
 		imageCreateInfo.arrayLayers = 1;
 		imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 		imageCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-		imageCreateInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+		imageCreateInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+			// SAMPLED so the deferred lighting pass reads the depth back
+			// (the framebuffer's depth-wrap precedent).
+			| VK_IMAGE_USAGE_SAMPLED_BIT;
 		imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 		imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -298,6 +301,30 @@ namespace TinyEngine {
 
 		VK_CHECK(vkCreateImageView(m_Device->GetDevice(), &viewCreateInfo, nullptr, &m_DepthImageView));
 		m_Device->SetObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t)m_DepthImageView, "Swapchain Depth Image View");
+
+		// The sample-read wrap - a non-comparison NEAREST sampler (depth
+		// must never be linearly filtered) + the bindless slot the lighting
+		// pass reads. The descriptor's layout is the depth READ layout (the
+		// RHI's canonical DepthRead), so the lighting pass's graph-derived
+		// barrier must land there.
+		VkSamplerCreateInfo depthSamplerCreateInfo{};
+		depthSamplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+		depthSamplerCreateInfo.magFilter = VK_FILTER_NEAREST;
+		depthSamplerCreateInfo.minFilter = VK_FILTER_NEAREST;
+		depthSamplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+		depthSamplerCreateInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		depthSamplerCreateInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		depthSamplerCreateInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		depthSamplerCreateInfo.minLod = 0.0f;
+		depthSamplerCreateInfo.maxLod = 0.0f;
+		VK_CHECK(vkCreateSampler(m_Device->GetDevice(), &depthSamplerCreateInfo, nullptr, &m_DepthSampler));
+
+		rhi::VulkanRhiDevice& rhiDevice = GetVulkanRhiDevice();
+		m_DepthBindlessIndex = rhiDevice.AllocateBindlessTextureIndex();
+		// SHADER_READ_ONLY_OPTIMAL, matching the framebuffer's own depth
+		// descriptor + the graph's ShaderRead state (the one sampled layout
+		// the whole tree uses for depth-only images).
+		rhiDevice.WriteTextureDescriptor(m_DepthBindlessIndex, m_DepthImageView, m_DepthSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
 		// One-time UNDEFINED -> DEPTH_ATTACHMENT_OPTIMAL transition, right here
 		// at creation rather than every frame in VulkanContext::RecordClearPass.
@@ -458,12 +485,17 @@ namespace TinyEngine {
 			m_ImageHandles.clear();
 		}
 
-		if (m_DepthImageView != VK_NULL_HANDLE)
-			vkDestroyImageView(device, m_DepthImageView, nullptr);
-		m_DepthImageView = VK_NULL_HANDLE;
-
+		// The depth's sample-read wrap retires through the queue (the
+		// bindless slot's tombstone + the in-flight frames still sampling it)
+		// instead of destroying synchronously.
 		if (m_DepthImage != VK_NULL_HANDLE)
-			vmaDestroyImage(m_Device->GetAllocator(), m_DepthImage, m_DepthAllocation);
+		{
+			rhi::VulkanRhiDevice& rhiDevice = GetVulkanRhiDevice();
+			rhiDevice.QueueTextureForDestruction(m_DepthImage, m_DepthAllocation, m_DepthImageView, m_DepthSampler, m_DepthBindlessIndex);
+		}
+		m_DepthSampler = VK_NULL_HANDLE;
+		m_DepthBindlessIndex = 0;
+		m_DepthImageView = VK_NULL_HANDLE;
 		m_DepthImage = VK_NULL_HANDLE;
 		m_DepthAllocation = VK_NULL_HANDLE;
 

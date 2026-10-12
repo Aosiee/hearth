@@ -120,6 +120,9 @@ namespace TinyEngine {
 		VkImage GetDepthImage() const { return m_DepthImage; }
 		VkImageView GetDepthImageView() const { return m_DepthImageView; }
 		static VkFormat GetDepthFormat() { return kSharedDepthFormat; }
+		// The depth's bindless slot (the deferred lighting pass samples it -
+		// the framebuffer's depth-wrap precedent).
+		uint32_t GetDepthBindlessIndex() const { return m_DepthBindlessIndex; }
 
 		// The swapchain's fixed colour format (ChooseSurfaceFormat
 		// prefers B8G8R8A8_UNORM - the same format the framebuffer spec
@@ -162,6 +165,10 @@ namespace TinyEngine {
 		VkImage m_DepthImage = VK_NULL_HANDLE;
 		VmaAllocation m_DepthAllocation = VK_NULL_HANDLE;
 		VkImageView m_DepthImageView = VK_NULL_HANDLE;
+		// The depth's sample-read wrap (nearest sampler + bindless
+		// slot) for the deferred lighting pass.
+		VkSampler m_DepthSampler = VK_NULL_HANDLE;
+		uint32_t m_DepthBindlessIndex = 0;
 		VkCommandPool m_TransitionCommandPool = VK_NULL_HANDLE;
 
 		// What ChoosePresentMode should prefer next time it runs - read by

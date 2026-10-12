@@ -84,6 +84,10 @@ namespace rhi {
 		virtual void DestroyBuffer(BufferHandle handle) = 0;
 		virtual void SetBufferData(BufferHandle handle, const void* data, uint64_t size, uint64_t offset = 0) = 0;
 		virtual void UploadBufferViaStaging(BufferHandle handle, const void* data, uint64_t size) = 0;
+		// Bind a storage buffer into the bindless storage binding (binding
+		// 1) at `index` (the per-frame/per-material SSBOs' descriptor write;
+		// the handle remembers the slot so DestroyBuffer retires it).
+		virtual void WriteBindlessBuffer(uint32_t index, BufferHandle handle) = 0;
 
 		virtual TextureHandle CreateTexture(const TextureDesc& desc, const void* initialData, uint64_t dataSize, const char* debugName) = 0;
 		// The baked-mip path: every level already carries final pixels (the

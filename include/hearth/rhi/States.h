@@ -16,6 +16,11 @@ namespace rhi {
 		DepthWrite,
 		DepthRead,
 		ShaderRead,
+		// A depth image sampled through the bindless set
+		// (SHADER_READ_ONLY_OPTIMAL, the descriptor's layout) but
+		// barrier-derived with the DEPTH aspect - distinct from
+		// ShaderRead so the barrier code knows it is a depth image.
+		DepthShaderRead,
 		TransferSrc,
 		TransferDst,
 		Present,
@@ -71,6 +76,7 @@ namespace rhi {
 		case TextureState::DepthWrite:   return "DepthWrite";
 		case TextureState::DepthRead:    return "DepthRead";
 		case TextureState::ShaderRead:   return "ShaderRead";
+		case TextureState::DepthShaderRead: return "DepthShaderRead";
 		case TextureState::TransferSrc:  return "TransferSrc";
 		case TextureState::TransferDst:  return "TransferDst";
 		case TextureState::Present:      return "Present";

@@ -174,7 +174,12 @@ namespace rg {
 		}
 
 		// ---- Topological order (stable Kahn's): a pass depends on every
-		// pass that wrote a texture it reads.
+		// pass that wrote a texture it reads (the RAW edges) PLUS every
+		// earlier-registered accessor of a texture it writes (the WAR/WAW
+		// edges: the deferred trio + the composite passes read/write the
+		// same resources, so a write must be ordered after the preceding
+		// readers, or a pure-writer pass floats before the lighting pass
+		// and erases it).
 		std::vector<uint32_t> inDegree(m_Passes.size(), 0);
 		std::vector<std::vector<uint32_t>> dependents(m_Passes.size());
 		for (uint32_t i = 0; i < m_Passes.size(); i++)
@@ -184,10 +189,29 @@ namespace rg {
 			for (const AccessRecord& access : m_Passes[i].Accesses)
 			{
 				if (access.Write)
-					continue;
-				for (uint32_t j = 0; j < m_Passes.size(); j++)
 				{
-					if (!m_Passes[j].Live || j == i)
+					// WAR/WAW: chain the texture's accessors in registration
+					// order (the previous accessor, read or write, must run
+					// first).
+					for (uint32_t j = i + 1; j < m_Passes.size(); j++)
+					{
+						if (!m_Passes[j].Live)
+							continue;
+						bool accessed = false;
+						for (const AccessRecord& later : m_Passes[j].Accesses)
+							if (later.Texture == access.Texture) { accessed = true; break; }
+						if (accessed)
+						{
+							dependents[i].push_back(j);
+							inDegree[j]++;
+							break; // only the NEXT accessor chains off this one
+						}
+					}
+					continue;
+				}
+				for (uint32_t j = 0; j < i; j++)
+				{
+					if (!m_Passes[j].Live)
 						continue;
 					for (const AccessRecord& produced : m_Passes[j].Accesses)
 					{

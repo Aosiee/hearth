@@ -28,9 +28,13 @@ namespace rhi {
 
 		TextureHandle Colors[kMaxColorAttachments] = {}; // invalid = absent
 		uint32_t ColorCount = 1;
+		// Per-attachment clear values (the G-buffer pass clears
+		// GB/SceneColor to different defaults than the display target's
+		// clear colour). LoadColor = false ignores these.
+		float ClearValues[kMaxColorAttachments][4] = {};
 		TextureHandle Depth;               // invalid = no depth attachment
 		bool   DepthReadOnly = false;
-		bool   LoadColor = true;           // true = clear (the clear value comes from the Device)
+		bool   LoadColor = true;           // true = clear (the per-attachment values above)
 		bool   LoadDepth = true;
 	};
 

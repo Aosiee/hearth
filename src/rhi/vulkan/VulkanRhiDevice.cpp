@@ -98,6 +98,7 @@ namespace rhi {
 			case TextureState::DepthWrite:   return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
 			case TextureState::DepthRead:    return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
 			case TextureState::ShaderRead:   return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			case TextureState::DepthShaderRead: return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			case TextureState::TransferSrc:  return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 			case TextureState::TransferDst:  return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 			case TextureState::Present:      return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -120,6 +121,7 @@ namespace rhi {
 			case TextureState::DepthWrite:   return VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
 			case TextureState::DepthRead:    return VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
 			case TextureState::ShaderRead:   return VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+			case TextureState::DepthShaderRead: return VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
 			case TextureState::TransferSrc:  return VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 			case TextureState::TransferDst:  return VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 			case TextureState::Present:      return VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
@@ -136,6 +138,7 @@ namespace rhi {
 			case TextureState::DepthWrite:   return VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 			case TextureState::DepthRead:    return VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
 			case TextureState::ShaderRead:   return VK_ACCESS_2_SHADER_READ_BIT;
+			case TextureState::DepthShaderRead: return VK_ACCESS_2_SHADER_READ_BIT;
 			case TextureState::TransferSrc:  return VK_ACCESS_2_TRANSFER_READ_BIT;
 			case TextureState::TransferDst:  return VK_ACCESS_2_TRANSFER_WRITE_BIT;
 			case TextureState::Present:      return VK_ACCESS_2_NONE;
@@ -250,14 +253,18 @@ namespace rhi {
 			{
 				if (!IsValid(attachment.Colors[i]))
 					continue;
-				VkRenderingAttachmentInfo& colourAttachment = colourAttachments[colourCount++];
+				VkRenderingAttachmentInfo& colourAttachment = colourAttachments[colourCount];
 				colourAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
 				colourAttachment.imageView = m_Device->GetTextureView(attachment.Colors[i]);
 				colourAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 				colourAttachment.loadOp = attachment.LoadColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 				colourAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-				const float* clear = m_Device->GetClearColour();
-				colourAttachment.clearValue.color = { { clear[0], clear[1], clear[2], clear[3] } };
+				// The per-attachment clear value (the single device clear
+				// colour stays as the fallback for callers that don't set
+				// one - all-zero is the default).
+				colourAttachment.clearValue.color = { { attachment.ClearValues[i][0], attachment.ClearValues[i][1],
+					attachment.ClearValues[i][2], attachment.ClearValues[i][3] } };
+				colourCount++;
 				if (renderArea.width == 0)
 					renderArea = m_Device->GetTextureSize(attachment.Colors[i]);
 			}
@@ -302,7 +309,9 @@ namespace rhi {
 			{
 				const TextureBarrier& t = barrier.Textures[i];
 				bool depth = t.From == TextureState::DepthWrite || t.From == TextureState::DepthRead
-					|| t.To == TextureState::DepthWrite || t.To == TextureState::DepthRead;
+					|| t.From == TextureState::DepthShaderRead
+					|| t.To == TextureState::DepthWrite || t.To == TextureState::DepthRead
+					|| t.To == TextureState::DepthShaderRead;
 				VkImageMemoryBarrier2 b{};
 				b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
 				b.image = m_Device->GetTextureImage(t.Texture);
@@ -1403,6 +1412,16 @@ namespace rhi {
 		return handle;
 	}
 
+	void VulkanRhiDevice::WriteBindlessBuffer(uint32_t index, BufferHandle handle)
+	{
+		VulkanBuffer* buffer = m_Buffers.Get(handle);
+		TE_CORE_ASSERT(buffer, "WriteBindlessBuffer with an invalid/stale buffer handle");
+		// The slot is remembered so DestroyBuffer's retire path tombstones
+		// the descriptor + recycles the index.
+		buffer->SetBindlessIndex(index);
+		WriteBufferDescriptor(index, buffer->GetHandle());
+	}
+
 	void VulkanRhiDevice::SetBufferData(BufferHandle handle, const void* data, uint64_t size, uint64_t offset)
 	{
 		if (VulkanBuffer* buffer = m_Buffers.Get(handle))
@@ -1423,7 +1442,17 @@ namespace rhi {
 
 		TextureHandle handle = m_Textures.Acquire();
 		VulkanTexture2D* texture = nullptr;
-		if (desc.MipLevels == 1)
+		// The graph-transient RENDER TARGET path - an attachment in the
+		// requested format, sampled back by the lighting/post passes. Depth
+		// transients are NOT needed (the G-buffer pass shares the target's
+		// own D32 depth) - assert instead of half-supporting.
+		if (desc.RenderTarget || desc.DepthTarget)
+		{
+			TE_CORE_ASSERT(!desc.DepthTarget, "depth render-target transients unsupported - the G-buffer shares the target's D32");
+			TE_CORE_ASSERT(desc.MipLevels == 1, "render-target transients are single-level");
+			texture = new VulkanTexture2D(desc.Width, desc.Height, ToVkFormat(desc.PixelFormat), false);
+		}
+		else if (desc.MipLevels == 1)
 		{
 			// P-D: a genuinely single-level texture (the baked-mip ctor
 			// uploads each level directly - no blit chain). The fixed

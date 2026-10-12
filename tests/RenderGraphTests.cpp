@@ -28,6 +28,7 @@ namespace rg_tests {
 		void DestroyBuffer(rhi::BufferHandle) override {}
 		void SetBufferData(rhi::BufferHandle, const void*, uint64_t, uint64_t) override {}
 		void UploadBufferViaStaging(rhi::BufferHandle, const void*, uint64_t) override {}
+		void WriteBindlessBuffer(uint32_t, rhi::BufferHandle) override {}
 
 		rhi::TextureHandle CreateTexture(const rhi::TextureDesc&, const void*, uint64_t, const char*) override
 		{
