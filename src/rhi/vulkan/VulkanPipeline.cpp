@@ -79,6 +79,11 @@ namespace TinyEngine {
 		rasterizationState.cullMode = VK_CULL_MODE_NONE;
 		rasterizationState.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 		rasterizationState.lineWidth = 1.0f;
+		// The local shadow caster's hardware slope-scaled bias (the
+		// values are dynamic state).
+		rasterizationState.depthBiasEnable = spec.DepthBiasEnable ? VK_TRUE : VK_FALSE;
+		rasterizationState.depthBiasConstantFactor = spec.DepthBiasConstantFactor;
+		rasterizationState.depthBiasSlopeFactor = spec.DepthBiasSlopeFactor;
 
 		VkPipelineMultisampleStateCreateInfo multisampleState{};
 		multisampleState.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -129,10 +134,12 @@ namespace TinyEngine {
 		colorBlendState.attachmentCount = colourCount;
 		colorBlendState.pAttachments = blendAttachments.data();
 
-		VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+		VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_DEPTH_BIAS };
 		VkPipelineDynamicStateCreateInfo dynamicState{};
 		dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-		dynamicState.dynamicStateCount = 2;
+		// The depth-bias state is only dynamic for the pipelines that use
+		// it (the local shadow caster); the rest keep viewport/scissor.
+		dynamicState.dynamicStateCount = spec.DepthBiasEnable ? 3u : 2u;
 		dynamicState.pDynamicStates = dynamicStates;
 
 		// No VkRenderPass/VkFramebuffer, this pipeline is built against the

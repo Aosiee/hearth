@@ -80,6 +80,11 @@ namespace TinyEngine {
 		bool DepthWriteEnable = false;
 		VkCompareOp DepthCompareOp = VK_COMPARE_OP_LESS;
 		VkFormat DepthAttachmentFormat = VK_FORMAT_UNDEFINED;
+		// The hardware slope-scaled depth bias (dynamic state; the local
+		// shadow caster's pipeline).
+		bool DepthBiasEnable = false;
+		float DepthBiasConstantFactor = 0.0f;
+		float DepthBiasSlopeFactor = 0.0f;
 
 		// FILL by default; the wireframe debug view's pipeline declares
 		// LINE (baked at creation - fixed-function state).

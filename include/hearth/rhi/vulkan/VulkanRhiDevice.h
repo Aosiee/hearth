@@ -58,6 +58,7 @@ namespace rhi {
 		void BindGlobalSet() override;
 		void SetViewport(float x, float y, float width, float height, float minDepth = 0.0f, float maxDepth = 1.0f) override;
 		void SetScissor(int32_t x, int32_t y, uint32_t width, uint32_t height) override;
+		void SetDepthBias(float constantFactor, float clamp, float slopeFactor) override;
 		void PushConstants(uint32_t stages, uint32_t offset, const void* data, uint32_t size) override;
 		void BindVertexBuffer(BufferHandle buffer, uint64_t offset = 0) override;
 		void BindIndexBuffer(BufferHandle buffer, uint64_t offset = 0) override;

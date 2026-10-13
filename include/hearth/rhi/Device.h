@@ -67,6 +67,12 @@ namespace rhi {
 		bool     DepthTestEnable = false;
 		bool     DepthWriteEnable = false;
 		CompareOp DepthCompareOp = CompareOp::Less;
+		// The hardware slope-scaled depth bias (the local shadow caster's
+		// rasterization state - the bias values are set dynamically via
+		// vkCmdSetDepthBias).
+		bool     DepthBiasEnable = false;
+		float    DepthBiasConstantFactor = 0.0f;
+		float    DepthBiasSlopeFactor = 0.0f;
 		PolygonFillMode PolygonMode = PolygonFillMode::Fill;
 		// An ARRAY of colour attachment formats (MRT for the G-buffer
 		// pass); single-colour pipelines set count 1.

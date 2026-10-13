@@ -53,6 +53,9 @@ namespace rhi {
 		// the renderers kept raw viewport/scissor commands through P-C).
 		virtual void SetViewport(float x, float y, float width, float height, float minDepth = 0.0f, float maxDepth = 1.0f) = 0;
 		virtual void SetScissor(int32_t x, int32_t y, uint32_t width, uint32_t height) = 0;
+		// The dynamic depth bias (the local shadow caster's
+		// slope-scaled bias).
+		virtual void SetDepthBias(float constantFactor, float clamp, float slopeFactor) = 0;
 
 		virtual void Barrier(std::span<const BarrierDesc> barriers) = 0;
 

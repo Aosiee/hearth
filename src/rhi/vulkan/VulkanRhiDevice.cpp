@@ -410,6 +410,11 @@ namespace rhi {
 		vkCmdSetScissor(m_CommandBuffer, 0, 1, &scissor);
 	}
 
+	void VulkanCommandList::SetDepthBias(float constantFactor, float clamp, float slopeFactor)
+	{
+		vkCmdSetDepthBias(m_CommandBuffer, constantFactor, clamp, slopeFactor);
+	}
+
 	void VulkanCommandList::PushConstants(uint32_t stages, uint32_t offset, const void* data, uint32_t size)
 	{
 		vkCmdPushConstants(m_CommandBuffer, m_BoundLayout, (VkShaderStageFlags)stages, offset, size, data);
@@ -1742,6 +1747,9 @@ namespace rhi {
 		spec.DepthTestEnable = desc.DepthTestEnable;
 		spec.DepthWriteEnable = desc.DepthWriteEnable;
 		spec.DepthCompareOp = ToVkCompareOp(desc.DepthCompareOp);
+		spec.DepthBiasEnable = desc.DepthBiasEnable;
+		spec.DepthBiasConstantFactor = desc.DepthBiasConstantFactor;
+		spec.DepthBiasSlopeFactor = desc.DepthBiasSlopeFactor;
 		spec.PolygonMode = ToVkPolygonMode(desc.PolygonMode);
 		TE_CORE_ASSERT(desc.ColorAttachmentCount <= PipelineStateDesc::kMaxColorAttachments,
 			"pipeline colour-attachment count over the RHI maximum");

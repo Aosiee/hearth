@@ -97,6 +97,7 @@ namespace rg_tests {
 		void EndRendering() override {}
 		void SetViewport(float, float, float, float, float, float) override {}
 		void SetScissor(int32_t, int32_t, uint32_t, uint32_t) override {}
+		void SetDepthBias(float, float, float) override {}
 
 		void Barrier(std::span<const rhi::BarrierDesc> barriers) override
 		{
