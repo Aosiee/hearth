@@ -165,7 +165,8 @@ namespace rhi {
 		// (idempotent; called from VulkanCommandList::BindGlobalSet).
 		void ApplyDescriptorLog(uint32_t slot);
 		void QueueTextureForDestruction(VkImage image, VmaAllocation allocation,
-			VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex);
+			VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex,
+			bool delayOneFrame = false);
 		void QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex = ~0u);
 		void QueuePipelineForDestruction(VkPipeline pipeline, VkPipelineLayout layout);
 		void QueueShaderForDestruction(VkShaderModule shader);
@@ -329,7 +330,7 @@ namespace rhi {
 			// slot's set has applied this seq.
 			uint64_t    TombstoneSeq = 0;
 		};
-		void QueueRetire(RetireEntry&& entry);
+		void QueueRetire(RetireEntry&& entry, bool delayOneFrame = false);
 		void FreeRetireEntry(const RetireEntry& entry);
 
 		// The generation-checked handle table: fixed-slot objects + a

@@ -491,7 +491,12 @@ namespace TinyEngine {
 		if (m_DepthImage != VK_NULL_HANDLE)
 		{
 			rhi::VulkanRhiDevice& rhiDevice = GetVulkanRhiDevice();
-			rhiDevice.QueueTextureForDestruction(m_DepthImage, m_DepthAllocation, m_DepthImageView, m_DepthSampler, m_DepthBindlessIndex);
+			// One extra submission before the destroy - the frames recorded
+			// against this depth hold command buffers that reset at the
+			// next frame's pool reset; destroying at the GPU-completion
+			// stamp landed one generation early (the startup
+			// double-recreate's vkDestroyImage-image-01000).
+			rhiDevice.QueueTextureForDestruction(m_DepthImage, m_DepthAllocation, m_DepthImageView, m_DepthSampler, m_DepthBindlessIndex, true);
 		}
 		m_DepthSampler = VK_NULL_HANDLE;
 		m_DepthBindlessIndex = 0;

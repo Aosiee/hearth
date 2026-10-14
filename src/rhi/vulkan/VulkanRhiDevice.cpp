@@ -1160,7 +1160,7 @@ namespace rhi {
 	}
 
 	void VulkanRhiDevice::QueueTextureForDestruction(VkImage image, VmaAllocation allocation,
-		VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex)
+		VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex, bool delayOneFrame)
 	{
 		RetireEntry entry;
 		entry.Kind_ = RetireEntry::Kind::Texture;
@@ -1191,7 +1191,7 @@ namespace rhi {
 			entry.TombstoneSeq = tombstone.Seq;
 		}
 
-		QueueRetire(std::move(entry));
+		QueueRetire(std::move(entry), delayOneFrame);
 	}
 
 	void VulkanRhiDevice::QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex)
@@ -1247,12 +1247,18 @@ namespace rhi {
 		QueueRetire(std::move(entry));
 	}
 
-	void VulkanRhiDevice::QueueRetire(RetireEntry&& entry)
+	void VulkanRhiDevice::QueueRetire(RetireEntry&& entry, bool delayOneFrame)
 	{
 		// The stamp is the value the NEXT submit will signal - the earliest
 		// submission that could reference this object. Stamping with the
-		// last-submitted value frees one frame too early.
-		entry.Stamp = m_Vulkan.GetLastSubmittedValue() + 1;
+		// last-submitted value frees one frame too early. `delayOneFrame`
+		// holds the entry one submission longer - the recorded
+		// command-buffer references live until the pools reset at the NEXT
+		// frame's record start, so a destroy timed to the GPU's completion
+		// alone can still land one generation before the reset (the
+		// swapchain's depth destroy did, at the startup double-recreate:
+		// vkDestroyImage-image-01000).
+		entry.Stamp = m_Vulkan.GetLastSubmittedValue() + 1 + (delayOneFrame ? 1u : 0u);
 		m_RetireQueue.push_back(std::move(entry));
 	}
 
