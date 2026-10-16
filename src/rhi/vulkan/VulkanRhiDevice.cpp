@@ -721,6 +721,13 @@ namespace rhi {
 
 			m_Vulkan.EndSingleTimeCommands(cmd);
 		}
+
+		// The slot 0 is the reserved "none" sentinel - the shaders'
+		// 0-as-none gates (the sky/LUT indices) sample the null texture.
+		// The allocator starts at 1 so no real texture can ever land on
+		// the sentinel.
+		WriteTextureDescriptor(0, m_NullTextureView, m_NullTextureSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		m_NextBindlessIndex = 1;
 	}
 
 	void VulkanRhiDevice::DestroyNullTexture()
