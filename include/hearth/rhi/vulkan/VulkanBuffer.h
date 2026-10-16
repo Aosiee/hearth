@@ -61,6 +61,9 @@ namespace TinyEngine {
 		VkBuffer GetHandle() const { return m_Buffer; }
 		VkDeviceSize GetSize() const { return m_Size; }
 		VmaAllocation GetAllocation() const { return m_Allocation; }
+		// The host-visible staging's persistently-mapped pointer (the
+		// IBL readback's memcpy source).
+		void* GetMappedData() const { return m_MappedData; }
 
 		// The buffer's slot in the bindless storage-buffer binding (1).
 		// ~0u = none (the DestroyBuffer path passes it to the retire
