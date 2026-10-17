@@ -166,7 +166,7 @@ namespace rhi {
 		void ApplyDescriptorLog(uint32_t slot);
 		void QueueTextureForDestruction(VkImage image, VmaAllocation allocation,
 			VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex,
-			bool delayOneFrame = false);
+			uint32_t extraSubmissions = 0u);
 		void QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex = ~0u);
 		void QueuePipelineForDestruction(VkPipeline pipeline, VkPipelineLayout layout);
 		void QueueShaderForDestruction(VkShaderModule shader);
@@ -330,7 +330,7 @@ namespace rhi {
 			// slot's set has applied this seq.
 			uint64_t    TombstoneSeq = 0;
 		};
-		void QueueRetire(RetireEntry&& entry, bool delayOneFrame = false);
+		void QueueRetire(RetireEntry&& entry, uint32_t extraSubmissions = 0u);
 		void FreeRetireEntry(const RetireEntry& entry);
 
 		// The generation-checked handle table: fixed-slot objects + a

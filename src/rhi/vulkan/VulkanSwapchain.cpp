@@ -495,8 +495,13 @@ namespace TinyEngine {
 			// against this depth hold command buffers that reset at the
 			// next frame's pool reset; destroying at the GPU-completion
 			// stamp landed one generation early (the startup
-			// double-recreate's vkDestroyImage-image-01000).
-			rhiDevice.QueueTextureForDestruction(m_DepthImage, m_DepthAllocation, m_DepthImageView, m_DepthSampler, m_DepthBindlessIndex, true);
+			// double-recreate's vkDestroyImage-image-01000). The depth's
+			// destroy holds several submissions: the recorded
+			// command-buffer references live until the per-slot pools reset
+			// (two full slot cycles), and the startup/rapid-resize
+			// double-recreate freed it one generation early at the +1/+2
+			// (the vkDestroyImage-image-01000).
+			rhiDevice.QueueTextureForDestruction(m_DepthImage, m_DepthAllocation, m_DepthImageView, m_DepthSampler, m_DepthBindlessIndex, 4u);
 		}
 		m_DepthSampler = VK_NULL_HANDLE;
 		m_DepthBindlessIndex = 0;
