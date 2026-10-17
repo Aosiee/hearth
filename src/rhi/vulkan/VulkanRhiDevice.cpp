@@ -1352,7 +1352,6 @@ namespace rhi {
 			return;
 
 		uint64_t completed = m_Vulkan.GetCompletedTimelineValue();
-
 		size_t write = 0;
 		for (size_t i = 0; i < m_RetireQueue.size(); i++)
 		{

@@ -325,6 +325,7 @@ namespace TinyEngine {
 		// descriptor + the graph's ShaderRead state (the one sampled layout
 		// the whole tree uses for depth-only images).
 		rhiDevice.WriteTextureDescriptor(m_DepthBindlessIndex, m_DepthImageView, m_DepthSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		m_DepthGeneration++;
 
 		// One-time UNDEFINED -> DEPTH_ATTACHMENT_OPTIMAL transition, right here
 		// at creation rather than every frame in VulkanContext::RecordClearPass.

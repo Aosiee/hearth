@@ -119,6 +119,10 @@ namespace TinyEngine {
 		// reason to buffer more than one.
 		VkImage GetDepthImage() const { return m_DepthImage; }
 		VkImageView GetDepthImageView() const { return m_DepthImageView; }
+		// The depth's recreation generation (the bump per CreateDepthResources
+		// - the context re-adopts its barrier-only handle when this changes,
+		// even at the same extent).
+		uint64_t GetDepthGeneration() const { return m_DepthGeneration; }
 		static VkFormat GetDepthFormat() { return kSharedDepthFormat; }
 		// The depth's bindless slot (the deferred lighting pass samples it -
 		// the framebuffer's depth-wrap precedent).
@@ -169,6 +173,7 @@ namespace TinyEngine {
 		// slot) for the deferred lighting pass.
 		VkSampler m_DepthSampler = VK_NULL_HANDLE;
 		uint32_t m_DepthBindlessIndex = 0;
+		uint64_t m_DepthGeneration = 0;
 		VkCommandPool m_TransitionCommandPool = VK_NULL_HANDLE;
 
 		// What ChoosePresentMode should prefer next time it runs - read by
