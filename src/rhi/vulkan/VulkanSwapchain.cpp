@@ -452,7 +452,7 @@ namespace TinyEngine {
 			m_Device->SetObjectName(VK_OBJECT_TYPE_SEMAPHORE, (uint64_t)m_ImageAvailableSemaphores[i], "Image Available Semaphore (frame " + std::to_string(i) + ")");
 			// P-A2: no fences - the frame slot's first acquire waits on
 			// timeline value 0 (an immediate no-op).
-			m_FrameLastValues[i] = 0;
+			m_FrameLastValues[i].store(0);
 		}
 	}
 
@@ -564,7 +564,7 @@ namespace TinyEngine {
 		// the old per-frame fence).
 		{
 			TE_PROFILE_SCOPE("Acquire: frame-slot timeline wait");
-			m_Device->WaitForTimelineValue(m_FrameLastValues[frameIndex]);
+			m_Device->WaitForTimelineValue(m_FrameLastValues[frameIndex].load());
 		}
 
 		// T-F-C: bounded wait - the acquire runs on the dedicated submit
@@ -664,7 +664,7 @@ namespace TinyEngine {
 		// frame-complete wait (VulkanContext:: SwapBuffers) - the retire
 		// queue + the VMA allocator never cross threads.
 		m_ImagesInFlight[imageIndex] = timelineValue;
-		m_FrameLastValues[frameIndex] = timelineValue;
+		m_FrameLastValues[frameIndex].store(timelineValue);
 
 		VkPresentInfoKHR presentInfo{};
 		presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;

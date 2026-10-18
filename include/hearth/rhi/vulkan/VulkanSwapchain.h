@@ -134,6 +134,13 @@ namespace TinyEngine {
 		// valid for both target kinds).
 		static VkFormat GetColourFormat() { return VK_FORMAT_B8G8R8A8_UNORM; }
 
+		// The frame's submit timeline value (0 = never submitted) - the
+		// game thread's auto-exposure readback gates on it (the copy's
+		// submission completed). The submit thread writes it once per
+		// frame; the game thread reads it two frames later, hence the
+		// atomic.
+		uint64_t GetFrameSubmitValue(uint32_t frameIndex) const { return m_FrameLastValues[frameIndex].load(); }
+
 	private:
 		void CreateSurface(GLFWwindow* window);
 		void CreateSwapchain(uint32_t width, uint32_t height);
@@ -212,7 +219,10 @@ namespace TinyEngine {
 		// frame's last submit value (0 = never submitted) is waited on before
 		// reusing the slot (P-A2 - the fences are gone).
 		VkSemaphore m_ImageAvailableSemaphores[VulkanDevice::FramesInFlight] = {};
-		uint64_t m_FrameLastValues[VulkanDevice::FramesInFlight] = {};
+		// The per-frame submit value is read by the game thread
+		// (GetFrameSubmitValue) - the atomic keeps the submit-thread store
+		// / game-thread load handoff well-defined.
+		std::atomic<uint64_t> m_FrameLastValues[VulkanDevice::FramesInFlight] = {};
 
 		// Tracks which frame's submit value last used a given swapchain image,
 		// so an acquire that hands back a still-in-use image waits on that
