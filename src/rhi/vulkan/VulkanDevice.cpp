@@ -111,6 +111,11 @@ namespace TinyEngine {
 	{
 		TE_PROFILE_FUNCTION();
 
+		// The Offscreen mode passes no window
+		// - the surface-dependent selections below skip the present
+		// requirement and the swapchain extension.
+		m_SurfaceEnabled = windowForExtensionQuery != nullptr;
+
 		VK_CHECK(volkInitialize());
 
 		CreateInstance(windowForExtensionQuery);
@@ -252,8 +257,6 @@ namespace TinyEngine {
 
 	void VulkanDevice::CreateInstance(GLFWwindow* windowForExtensionQuery)
 	{
-		(void)windowForExtensionQuery;
-
 		VkApplicationInfo appInfo{};
 		appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
 		appInfo.pApplicationName = "TinyEngine App";
@@ -265,11 +268,19 @@ namespace TinyEngine {
 		// features rather than extensions further down this backend.
 		appInfo.apiVersion = VK_API_VERSION_1_3;
 
+		// The Offscreen mode passes no window - the surface/swapchain
+		// extensions are omitted entirely (the device is created
+		// display-agnostic; the NVIDIA/Mesa drivers allow this with no
+		// X/Wayland present).
 		uint32_t glfwExtensionCount = 0;
-		const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-		TE_CORE_ASSERT(glfwExtensions, "GLFW could not provide the instance extensions Vulkan surface creation needs on this platform!");
-
-		std::vector<const char*> extensions(glfwExtensions, glfwExtensions + glfwExtensionCount);
+		const char** glfwExtensions = nullptr;
+		std::vector<const char*> extensions;
+		if (windowForExtensionQuery != nullptr)
+		{
+			glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
+			TE_CORE_ASSERT(glfwExtensions, "GLFW could not provide the instance extensions Vulkan surface creation needs on this platform!");
+			extensions.assign(glfwExtensions, glfwExtensions + glfwExtensionCount);
+		}
 
 #ifdef TE_ENABLE_ASSERTS
 		m_ValidationEnabled = CheckValidationLayerSupport();
@@ -366,7 +377,11 @@ namespace TinyEngine {
 			for (uint32_t i = 0; i < queueFamilyCount; i++)
 			{
 				bool hasGraphics = (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
-				bool canPresent = glfwGetPhysicalDevicePresentationSupport(m_Instance, device, i) == GLFW_TRUE;
+				// The Offscreen mode has no surface - the present
+				// capability is not required (any graphics-capable queue
+				// family works).
+				const bool canPresent = !m_SurfaceEnabled
+					|| glfwGetPhysicalDevicePresentationSupport(m_Instance, device, i) == GLFW_TRUE;
 
 				if (hasGraphics && canPresent)
 				{
@@ -476,14 +491,17 @@ namespace TinyEngine {
 		features2.features.samplerAnisotropy = m_SamplerAnisotropySupported ? VK_TRUE : VK_FALSE;
 		features2.features.fillModeNonSolid = m_FillModeNonSolidSupported ? VK_TRUE : VK_FALSE;
 
+		// The Offscreen mode omits the swapchain extension (no
+		// surface).
 		const char* deviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 		VkDeviceCreateInfo createInfo{};
 		createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 		createInfo.pNext = &features2;
 		createInfo.queueCreateInfoCount = 1;
 		createInfo.pQueueCreateInfos = &queueCreateInfo;
-		createInfo.enabledExtensionCount = (uint32_t)(sizeof(deviceExtensions) / sizeof(deviceExtensions[0]));
-		createInfo.ppEnabledExtensionNames = deviceExtensions;
+		createInfo.enabledExtensionCount = m_SurfaceEnabled
+			? (uint32_t)(sizeof(deviceExtensions) / sizeof(deviceExtensions[0])) : 0u;
+		createInfo.ppEnabledExtensionNames = m_SurfaceEnabled ? deviceExtensions : nullptr;
 		// pEnabledFeatures is deliberately left null, the feature chain above (via
 		// pNext) is how features are requested when using VkPhysicalDeviceFeatures2.
 

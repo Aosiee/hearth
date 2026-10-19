@@ -223,6 +223,10 @@ namespace TinyEngine {
 		bool m_ValidationEnabled = false;
 		bool m_SamplerAnisotropySupported = false;
 		bool m_FillModeNonSolidSupported = false;
+		// The Offscreen mode (the null window) creates the device without
+		// the surface/swapchain extensions and without the
+		// present-capability requirement.
+		bool m_SurfaceEnabled = true;
 		// GPU frame debugger timing.
 		// One query pool per frame slot (window slot * FramesInFlight), same
 		// reasoning as the command pools: reusing slot N is only safe once

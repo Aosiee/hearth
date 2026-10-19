@@ -515,7 +515,10 @@ namespace rhi {
 	{
 		if (m_Initialized)
 			return;
-		TE_CORE_ASSERT(windowForExtensionQuery, "the RHI device must be initialised by a window (instance-extension query)");
+		// The Offscreen mode passes no window - the device is created
+		// without the surface extensions; the windowed path's assert is
+		// dropped so the null window flows through (the instance-extension
+		// query skips on null).
 		m_Vulkan.Init(windowForExtensionQuery);
 		m_Initialized = true;
 		m_GraphicsQueue.Index = 0;
