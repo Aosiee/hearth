@@ -410,6 +410,11 @@ namespace TinyEngine {
 		VkPhysicalDeviceProperties properties;
 		vkGetPhysicalDeviceProperties(m_PhysicalDevice, &properties);
 		TE_CORE_INFO(LogVulkan, "Vulkan Physical Device: {0}", properties.deviceName);
+		// The capture sidecar's GPU identity (the CI golden-source
+		// policy's key).
+		m_DeviceName = properties.deviceName;
+		m_DriverVersion = properties.driverVersion;
+		m_ApiVersion = properties.apiVersion;
 
 		// Needed to convert GPU timestamp query results (raw ticks) into
 		// milliseconds for the GPU frame debugger. timestampValidBits == 0 on
