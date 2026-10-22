@@ -25,6 +25,15 @@ namespace rhi {
 		uint32_t LayerCount = 1;
 	};
 
+	// The "remaining subresources" sentinels (the Vulkan
+	// VK_REMAINING_MIP_LEVELS / VK_REMAINING_ARRAY_LAYERS convention,
+	// expressed backend-neutrally). An imported texture's true mip/layer
+	// count is unknown to the RenderGraph, so its barriers cover
+	// everything from the base level/layer down; the Vulkan backend passes
+	// ~0u straight through to the subresourceRange.
+	inline constexpr uint32_t kRemainingMipLevels   = ~0u;
+	inline constexpr uint32_t kRemainingArrayLayers = ~0u;
+
 	struct BufferBarrier
 	{
 		BufferHandle Buffer;

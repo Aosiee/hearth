@@ -162,7 +162,7 @@ namespace TinyEngine {
 		// load, not every frame) that stalling for them is fine for now, an async
 		// transfer queue can replace this later if upload volume ever justifies it.
 		VkCommandBuffer BeginSingleTimeCommands() const;
-		void EndSingleTimeCommands(VkCommandBuffer commandBuffer) const;
+		void EndSingleTimeCommands(VkCommandBuffer commandBuffer);
 
 		// The upload batch. While a batch is active on the CALLING
 		// thread, BeginSingleTimeCommands returns the batch's command

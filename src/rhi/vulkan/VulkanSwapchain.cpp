@@ -369,19 +369,32 @@ namespace TinyEngine {
 
 		VK_CHECK(vkEndCommandBuffer(commandBuffer));
 
+		uint64_t signalValue = 0;
+		VkTimelineSemaphoreSubmitInfo timelineInfo{};
+		timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+		timelineInfo.signalSemaphoreValueCount = 1;
+		timelineInfo.pSignalSemaphoreValues = &signalValue;
+
+		VkSemaphore timelineSemaphore = m_Device->GetTimelineSemaphore();
 		VkSubmitInfo submitInfo{};
 		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		submitInfo.commandBufferCount = 1;
 		submitInfo.pCommandBuffers = &commandBuffer;
+		submitInfo.pNext = &timelineInfo;
+		submitInfo.signalSemaphoreCount = 1;
+		submitInfo.pSignalSemaphores = &timelineSemaphore;
 
-		// Scoped queue lock (submit + waitIdle) - the transition must land
-		// before the image is used, and this runs on the submit thread while
-		// other windows' frames submit on the same queue.
+		// Scoped queue lock (submit) - the transition must land before the
+		// image is used, and this runs on the submit thread while other
+		// windows' frames submit on the same queue. The timeline VALUE is
+		// allocated inside the lock; the wait is on the specific signal,
+		// not a drain of the whole queue.
 		{
 			std::lock_guard queueLock(m_Device->GetQueueMutex());
+			signalValue = m_Device->AllocateTimelineValue();
 			VK_CHECK(vkQueueSubmit(m_Device->GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
-			VK_CHECK(vkQueueWaitIdle(m_Device->GetGraphicsQueue()));
 		}
+		m_Device->WaitForTimelineValue(signalValue);
 
 		vkFreeCommandBuffers(m_Device->GetDevice(), m_TransitionCommandPool, 1, &commandBuffer);
 	}
@@ -502,7 +515,7 @@ namespace TinyEngine {
 			// (two full slot cycles), and the startup/rapid-resize
 			// double-recreate freed it one generation early at the +1/+2
 			// (the vkDestroyImage-image-01000).
-			rhiDevice.QueueTextureForDestruction(m_DepthImage, m_DepthAllocation, m_DepthImageView, m_DepthSampler, m_DepthBindlessIndex, 4u);
+			rhiDevice.QueueTextureForDestruction(m_DepthImage, m_DepthAllocation, m_DepthImageView, m_DepthSampler, m_DepthBindlessIndex);
 		}
 		m_DepthSampler = VK_NULL_HANDLE;
 		m_DepthBindlessIndex = 0;

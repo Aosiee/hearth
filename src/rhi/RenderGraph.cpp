@@ -19,6 +19,17 @@ namespace rg {
 			entry.Desc = desc;
 			entry.Handle = device.CreateTexture(desc, nullptr, 0, debugName);
 		}
+		else if (entry.Desc != desc)
+		{
+			// The old form kept the stale texture on a key hit even when
+			// the desc changed (a resize/format change), so the graph drew
+			// into a texture that no longer matched its attachment.
+			// DestroyTexture retires through the queue - the replacement
+			// is a fresh handle.
+			device.DestroyTexture(entry.Handle);
+			entry.Desc = desc;
+			entry.Handle = device.CreateTexture(desc, nullptr, 0, debugName);
+		}
 		return entry.Handle;
 	}
 
@@ -146,7 +157,10 @@ namespace rg {
 		}
 
 		// Propagate liveness backward: any pass that wrote a texture a live
-		// pass reads is itself live.
+		// pass reads is itself live. EVERY writer of the texture must be
+		// marked - the old break-after-first-writer culled a texture's
+		// second writer, so a same-layout WAW chain silently dropped its
+		// later passes (the WAW test exposed it).
 		for (size_t cursor = 0; cursor < live.size(); cursor++)
 		{
 			const Pass& consumer = m_Passes[live[cursor]];
@@ -167,8 +181,6 @@ namespace rg {
 							break;
 						}
 					}
-					if (m_Passes[i].Live)
-						break;
 				}
 			}
 		}
@@ -252,6 +264,7 @@ namespace rg {
 		// tracking state; a state change between consecutive users is a
 		// barrier edge recorded against the later pass.
 		std::vector<TextureState> state(m_Textures.size());
+		std::vector<bool> touched(m_Textures.size(), false);
 		for (uint32_t i = 0; i < m_Textures.size(); i++)
 			state[i] = m_Textures[i].State;
 
@@ -260,20 +273,44 @@ namespace rg {
 			Pass& pass = m_Passes[m_Order[orderIndex]];
 			for (const AccessRecord& access : pass.Accesses)
 			{
-				TextureState before = state[access.Texture.Index];
-				if (before != access.State)
+				const uint32_t texIndex = access.Texture.Index;
+				TextureState before = state[texIndex];
+				// A state change OR a write that follows an earlier access
+				// this frame (the same-layout WAW edge the layout-only
+				// check dropped - two passes writing one texture to the
+				// same state still need the execution/memory dependency a
+				// same-layout barrier provides) needs a barrier. The first
+				// access this frame is excluded: its cross-frame
+				// dependency is the frame-boundary pacing, not a barrier.
+				if (before != access.State || (access.Write && touched[texIndex]))
 				{
 					CompiledBarrier barrier;
 					barrier.PassName = pass.Name;
 					barrier.OrderIndex = orderIndex;
-					barrier.TextureIndex = access.Texture.Index;
+					barrier.TextureIndex = texIndex;
 					barrier.From = before;
 					barrier.To = access.State;
 					m_CompiledBarriers.push_back(barrier);
 				}
-				state[access.Texture.Index] = access.State;
+				state[texIndex] = access.State;
+				touched[texIndex] = true;
 			}
 		}
+
+		// The per-pass barrier ranges: the barriers above are appended in
+		// ascending OrderIndex order, so each pass's barriers are a
+		// contiguous slice. RecordPass reads its slice directly instead of
+		// scanning every compiled barrier.
+		m_PassBarrierBegin.resize(m_Order.size() + 1);
+		uint32_t barrierCursor = 0;
+		for (uint32_t orderIndex = 0; orderIndex < m_Order.size(); orderIndex++)
+		{
+			m_PassBarrierBegin[orderIndex] = barrierCursor;
+			while (barrierCursor < m_CompiledBarriers.size() &&
+				m_CompiledBarriers[barrierCursor].OrderIndex == orderIndex)
+				barrierCursor++;
+		}
+		m_PassBarrierBegin[m_Order.size()] = barrierCursor;
 
 		for (uint32_t i : m_Order)
 			m_CompiledPasses.push_back({ m_Passes[i].Name });
@@ -378,26 +415,33 @@ namespace rg {
 		// The barrier descriptors point into the textureBarriers vector -
 		// the reserve prevents reallocation invalidating them mid-pass (the
 		// same contract the old Execute held).
+		const uint32_t barrierBegin = m_PassBarrierBegin[orderIndex];
+		const uint32_t barrierEnd = m_PassBarrierBegin[orderIndex + 1];
 		std::vector<BarrierDesc> barriers;
 		std::vector<TextureBarrier> textureBarriers;
-		barriers.reserve(m_CompiledBarriers.size());
-		textureBarriers.reserve(m_CompiledBarriers.size());
-		for (const CompiledBarrier& compiled : m_CompiledBarriers)
+		barriers.reserve(barrierEnd - barrierBegin);
+		textureBarriers.reserve(barrierEnd - barrierBegin);
+		for (uint32_t i = barrierBegin; i < barrierEnd; i++)
 		{
-			if (compiled.OrderIndex != orderIndex)
-				continue;
+			const CompiledBarrier& compiled = m_CompiledBarriers[i];
+			const VirtualTexture& virtualTexture = m_Textures[compiled.TextureIndex];
 
 			textureBarriers.push_back({});
 			TextureBarrier& textureBarrier = textureBarriers.back();
-			textureBarrier.Texture = m_Textures[compiled.TextureIndex].Imported
-				? m_Textures[compiled.TextureIndex].Handle
+			textureBarrier.Texture = virtualTexture.Imported
+				? virtualTexture.Handle
 				: m_Pool.GetHandle(TransientTexturePool::MakeKey(m_GraphId, compiled.TextureIndex));
 			textureBarrier.From = compiled.From;
 			textureBarrier.To = compiled.To;
 			textureBarrier.BaseMip = 0;
-			textureBarrier.MipCount = 1;
 			textureBarrier.BaseLayer = 0;
-			textureBarrier.LayerCount = 1;
+			// An imported texture's true mip/layer range is unknown to the
+			// graph (the adopted external images: the swapchain, the
+			// framebuffer targets, the 2-layer local shadow atlas) - cover
+			// everything. A transient's range is its desc: MipLevels mips,
+			// one layer (TextureDesc has no array-layers field).
+			textureBarrier.MipCount = virtualTexture.Imported ? kRemainingMipLevels : virtualTexture.Desc.MipLevels;
+			textureBarrier.LayerCount = virtualTexture.Imported ? kRemainingArrayLayers : 1u;
 
 			BarrierDesc barrierDesc;
 			barrierDesc.Textures = &textureBarrier;

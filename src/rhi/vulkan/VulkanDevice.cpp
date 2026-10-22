@@ -132,8 +132,12 @@ namespace TinyEngine {
 
 		CreateAllocator();
 		CreateCommandPools();
-		CreateTimestampQueryPools();
+		// The timeline semaphore must exist before the timestamp pools
+		// - each pool's one-time reset submits through
+		// EndSingleTimeCommands, which now signals + waits on the
+		// timeline (the old order handed it a null semaphore).
 		CreateTimelineSemaphore();
+		CreateTimestampQueryPools();
 	}
 
 	void VulkanDevice::CreateTimelineSemaphore()
@@ -650,7 +654,7 @@ namespace TinyEngine {
 		return commandBuffer;
 	}
 
-	void VulkanDevice::EndSingleTimeCommands(VkCommandBuffer commandBuffer) const
+	void VulkanDevice::EndSingleTimeCommands(VkCommandBuffer commandBuffer)
 	{
 		// The batch owns the end + submit for its own buffer.
 		if (s_UploadBatch.Buffer != VK_NULL_HANDLE)
@@ -661,21 +665,36 @@ namespace TinyEngine {
 
 		VK_CHECK(vkEndCommandBuffer(commandBuffer));
 
+		uint64_t signalValue = 0;
+		VkTimelineSemaphoreSubmitInfo timelineInfo{};
+		timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+		timelineInfo.signalSemaphoreValueCount = 1;
+		timelineInfo.pSignalSemaphoreValues = &signalValue;
+
 		VkSubmitInfo submitInfo{};
 		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		submitInfo.commandBufferCount = 1;
 		submitInfo.pCommandBuffers = &commandBuffer;
+		submitInfo.pNext = &timelineInfo;
+		submitInfo.signalSemaphoreCount = 1;
+		submitInfo.pSignalSemaphores = &m_TimelineSemaphore;
 
 		// T-F-C: the queue is externally synchronized - the game-thread
 		// uploads and the submit thread's frame submits serialize on it.
+		// The timeline VALUE is allocated inside the lock (the same
+		// VUID-VkSubmitInfo-pSignalSemaphores-03242 ordering the batch
+		// honours).
 		{
 			std::lock_guard lock(m_QueueMutex);
+			signalValue = AllocateTimelineValue();
 			VK_CHECK(vkQueueSubmit(m_GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE));
-			// Simplest possible sync for a one-off upload: just wait for the whole
-			// queue to drain. Fine for occasional resource loads, see the header
-			// comment on why this isn't trying to be an async transfer system yet.
-			VK_CHECK(vkQueueWaitIdle(m_GraphicsQueue));
 		}
+
+		// Wait for THIS submission only (not the whole queue): a one-off
+		// upload no longer drains every in-flight frame, and any frame
+		// submitted after it is not stalled. The staging is reclaimed by
+		// the caller once this returns.
+		WaitForTimelineValue(signalValue);
 
 		vkFreeCommandBuffers(m_Device, m_TransientCommandPool, 1, &commandBuffer);
 	}
@@ -970,6 +989,11 @@ namespace TinyEngine {
 		int index = loom::CurrentThreadIndex();
 		if (index < 0)
 			index = 0;
+		// The dev assert catches the pool-count mismatch the silent clamp
+		// used to hide (two threads sharing one pool); the clamp stays
+		// the release-only fallback.
+		TE_CORE_ASSERT((uint32_t)index < m_RecordThreadCount,
+			"the loom thread index exceeds the record pool count");
 		return (uint32_t)index < m_RecordThreadCount ? (uint32_t)index : m_RecordThreadCount - 1;
 	}
 

@@ -36,6 +36,16 @@ namespace rhi {
 		bool     RenderTarget = false; // colour-attachment usage
 		bool     DepthTarget = false;  // depth-attachment usage
 		SamplerKind Sampler = SamplerKind::Linear;
+
+		// The TransientTexturePool's key-hit comparison (a changed desc
+		// recreates the texture) - plain fieldwise equality.
+		bool operator==(const TextureDesc& other) const
+		{
+			return Width == other.Width && Height == other.Height && MipLevels == other.MipLevels &&
+				PixelFormat == other.PixelFormat && RenderTarget == other.RenderTarget &&
+				DepthTarget == other.DepthTarget && Sampler == other.Sampler;
+		}
+		bool operator!=(const TextureDesc& other) const { return !(*this == other); }
 	};
 
 	struct SamplerDesc

@@ -1,6 +1,7 @@
 #include "tepch.h"
 #include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
 #include "Platform/Vulkan/VulkanFrameContext.h" // GetRecordFrameIndex (the P-F slot pick)
+#include "Platform/Vulkan/VulkanContext.h" // GetMainVulkanContext->GetCurrentFrameSlot (the retire queue's slot tag)
 
 #include "TinyEngine/Core/Log.h"
 #include "TinyEngine/Core/Application.h"
@@ -483,12 +484,16 @@ namespace rhi {
 
 	void VulkanCommandList::WriteTimestamp(uint32_t queryIndex)
 	{
-		// The device's timestamp pools are frame-indexed; the RHI command
-		// list doesn't know its frame slot yet, so P-C (the port that
-		// sources GpuFrameDebugData through WriteTimestamp) threads the
-		// frame index in. Until then this writes the frame-0 pool.
+		// The device's timestamp pools are frame-indexed; pick the
+		// RECORD-side frame slot when inside a record job (the pool the
+		// pass's frame will read back), else the frame-0 pool (the
+		// pre-record / no-callers path). The old form always wrote frame
+		// 0's pool, so a non-zero slot's labels would land in a pool no
+		// one reads.
+		const uint32_t frameSlot = TryGetRecordFrameIndex();
+		const uint32_t pool = frameSlot == kNoFrameSlot ? 0 : frameSlot;
 		vkCmdWriteTimestamp(m_CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-			m_Device->GetVulkan()->GetTimestampPool(0), queryIndex);
+			m_Device->GetVulkan()->GetTimestampPool(pool), queryIndex);
 	}
 
 	VkCommandBuffer VulkanCommandList::GetCommandBuffer() const { return m_CommandBuffer; }
@@ -1046,10 +1051,15 @@ namespace rhi {
 		const uint64_t lastApplied = m_LastAppliedSeq[slot];
 
 		// Collect the entries this slot hasn't applied yet (they are
-		// already in log order, seq ascending).
-		std::vector<VkWriteDescriptorSet> writes;
-		std::vector<VkDescriptorImageInfo> imageInfos;
-		std::vector<VkDescriptorBufferInfo> bufferInfos;
+		// already in log order, seq ascending). The scratch buffers are
+		// reused across applies (the old form allocated three log-sized
+		// vectors per slot per frame).
+		std::vector<VkWriteDescriptorSet>& writes = m_ApplyScratchWrites;
+		std::vector<VkDescriptorImageInfo>& imageInfos = m_ApplyScratchImageInfos;
+		std::vector<VkDescriptorBufferInfo>& bufferInfos = m_ApplyScratchBufferInfos;
+		writes.clear();
+		imageInfos.clear();
+		bufferInfos.clear();
 		writes.reserve(m_DescriptorWriteLog.size());
 		imageInfos.reserve(m_DescriptorWriteLog.size());
 		bufferInfos.reserve(m_DescriptorWriteLog.size());
@@ -1127,10 +1137,41 @@ namespace rhi {
 
 	uint64_t VulkanRhiDevice::MinLastAppliedSeq() const
 	{
-		uint64_t min = m_LastAppliedSeq[0];
-		for (uint32_t i = 1; i < VulkanDevice::TotalFrameSlots; i++)
+		// The min over the EXPECTED slots. An expected slot that hasn't
+		// applied yet reads as the seq 0 - the floor stays 0 until it
+		// applies (its first apply is the FULL log rewrite, so the
+		// entries must survive until then). The never-expected slots (the
+		// never-opened windows) stay out.
+		uint64_t min = UINT64_MAX;
+		for (uint32_t i = 0; i < VulkanDevice::TotalFrameSlots; i++)
+		{
+			if (!m_SlotExpected[i])
+				continue;
 			min = std::min(min, m_LastAppliedSeq[i]);
-		return min;
+		}
+		return min == UINT64_MAX ? 0u : min;
+	}
+
+	void VulkanRhiDevice::NoteSlotExpected(uint32_t base)
+	{
+		std::lock_guard lock(m_DescriptorLogMutex);
+		for (uint32_t i = 0; i < VulkanDevice::FramesInFlight; i++)
+		{
+			const uint32_t slot = base + i;
+			if (slot < VulkanDevice::TotalFrameSlots)
+				m_SlotExpected[slot] = true;
+		}
+	}
+
+	void VulkanRhiDevice::DeactivateWindowSlots(uint32_t base)
+	{
+		std::lock_guard lock(m_DescriptorLogMutex);
+		for (uint32_t i = 0; i < VulkanDevice::FramesInFlight; i++)
+		{
+			const uint32_t slot = base + i;
+			if (slot < VulkanDevice::TotalFrameSlots)
+				m_SlotExpected[slot] = false;
+		}
 	}
 
 	void VulkanRhiDevice::TryRecyclePendingIndices()
@@ -1170,7 +1211,7 @@ namespace rhi {
 	}
 
 	void VulkanRhiDevice::QueueTextureForDestruction(VkImage image, VmaAllocation allocation,
-		VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex, uint32_t extraSubmissions)
+		VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex)
 	{
 		RetireEntry entry;
 		entry.Kind_ = RetireEntry::Kind::Texture;
@@ -1201,7 +1242,7 @@ namespace rhi {
 			entry.TombstoneSeq = tombstone.Seq;
 		}
 
-		QueueRetire(std::move(entry), extraSubmissions);
+		QueueRetire(std::move(entry));
 	}
 
 	void VulkanRhiDevice::QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex)
@@ -1257,19 +1298,43 @@ namespace rhi {
 		QueueRetire(std::move(entry));
 	}
 
-	void VulkanRhiDevice::QueueRetire(RetireEntry&& entry, uint32_t extraSubmissions)
+	void VulkanRhiDevice::QueueRetire(RetireEntry&& entry)
 	{
-		// The stamp is the value the NEXT submit will signal - the earliest
-		// submission that could reference this object. Stamping with the
-		// last-submitted value frees one frame too early. The
-		// `extraSubmissions` hold the entry that many submissions longer -
-		// the recorded command-buffer references live until the pools reset
-		// at the NEXT frame's record start, so a destroy timed to the GPU's
-		// completion alone can still land one generation before the reset
-		// (the swapchain's depth destroy did, at the startup
-		// double-recreate: vkDestroyImage-image-01000).
-		entry.Stamp = m_Vulkan.GetLastSubmittedValue() + 1 + extraSubmissions;
+		// The frame-boundary tagging - the entry frees once the SLOT's
+		// record-start resets reach the tag (the frame's own command
+		// buffers referencing the object are freed at the slot's reset
+		// TWO record-starts later, and that reset's acquire-fence wait
+		// covers the frame's submission completion). No timeline
+		// prediction: an interleaved upload batch or another window's
+		// submit can no longer consume the stamp (the old
+		// last-submitted+1 form freed one submission early). The
+		// secondary windows' extracts bucket into the MAIN window's slot
+		// (their resources are the swapchain's own, whose teardown parks
+		// the device anyway) - the documented approximation.
+		// The slot tag: the record-side index when on the record/submit
+		// thread (the resize-path destroys there), the game thread's
+		// current slot when on the game thread, and the slot 0 otherwise
+		// (the shutdown-time destroys - the unconditional drain frees
+		// those anyway; the submit thread's non-record destroys bucket
+		// into slot 0 as the documented approximation).
+		entry.Slot = TryGetRecordFrameIndex();
+		if (entry.Slot == kNoFrameSlot)
+		{
+			entry.Slot = 0;
+			if (VulkanContext* context = TryGetMainVulkanContext())
+			{
+				if (context->IsGameThread())
+					entry.Slot = context->GetCurrentFrameSlot();
+			}
+		}
+		entry.ResetTag = m_SlotResetCount[entry.Slot].load(std::memory_order_relaxed) + 2;
 		m_RetireQueue.push_back(std::move(entry));
+	}
+
+	void VulkanRhiDevice::NoteSlotReset(uint32_t slot)
+	{
+		if (slot < VulkanDevice::TotalFrameSlots)
+			m_SlotResetCount[slot].fetch_add(1u, std::memory_order_release);
 	}
 
 	void VulkanRhiDevice::FreeRetireEntry(const RetireEntry& entry)
@@ -1354,13 +1419,15 @@ namespace rhi {
 		if (m_RetireQueue.empty())
 			return;
 
-		uint64_t completed = m_Vulkan.GetCompletedTimelineValue();
+		// The per-entry reset-tag check (the slot's record-start
+		// resets) instead of the completed-timeline stamp.
 		size_t write = 0;
 		for (size_t i = 0; i < m_RetireQueue.size(); i++)
 		{
-			if (m_RetireQueue[i].Stamp <= completed)
+			const RetireEntry& entry = m_RetireQueue[i];
+			if (entry.ResetTag <= m_SlotResetCount[entry.Slot].load(std::memory_order_acquire))
 			{
-				FreeRetireEntry(m_RetireQueue[i]);
+				FreeRetireEntry(entry);
 				continue;
 			}
 			if (write != i)

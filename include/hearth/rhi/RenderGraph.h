@@ -236,6 +236,10 @@ namespace rg {
 		std::vector<uint32_t> m_Order;
 		std::vector<CompiledPass> m_CompiledPasses;
 		std::vector<CompiledBarrier> m_CompiledBarriers;
+		// The per-pass barrier ranges into m_CompiledBarriers (which is
+		// appended in ascending OrderIndex order): m_PassBarrierBegin[i] is
+		// the first barrier of compiled pass i, [i+1] the exclusive end.
+		std::vector<uint32_t> m_PassBarrierBegin;
 		std::vector<TextureState> m_FinalStates;
 	};
 

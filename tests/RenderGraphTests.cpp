@@ -273,7 +273,7 @@ namespace rg_tests {
 		CHECK(found);
 	}
 
-	TEST_CASE("rendergraph: same-state neighbours need no barrier")
+	TEST_CASE("rendergraph: same-state writes emit a WAW barrier")
 	{
 		rg::TransientTexturePool pool;
 		rg::RenderGraph graph(pool);
@@ -295,14 +295,20 @@ namespace rg_tests {
 
 		graph.Compile();
 
-		// The two adjacent RenderTarget writes must NOT produce a
-		// RenderTarget -> RenderTarget edge; the RenderTarget -> ShaderRead
-		// edge and the first-use / export edges are the only ones.
+		// The two adjacent RenderTarget writes need a same-layout WAW
+		// barrier (the execution/memory dependency the layout-only
+		// check used to drop) - the second write emits a RenderTarget
+		// -> RenderTarget edge.
+		bool foundWaw = false;
 		for (const auto& barrier : graph.GetCompiledBarriers())
 		{
-			bool sameStateEdge = (barrier.From == rhi::TextureState::RenderTarget) && (barrier.To == rhi::TextureState::RenderTarget);
-			CHECK_FALSE(sameStateEdge);
+			if (barrier.From == rhi::TextureState::RenderTarget && barrier.To == rhi::TextureState::RenderTarget)
+			{
+				foundWaw = true;
+				CHECK(barrier.PassName == "MoreScene");
+			}
 		}
+		CHECK(foundWaw);
 
 		bool found = false;
 		for (const auto& barrier : graph.GetCompiledBarriers())

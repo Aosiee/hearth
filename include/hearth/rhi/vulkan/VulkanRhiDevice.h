@@ -20,6 +20,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <vector>
+#include <atomic>
 
 struct GLFWwindow;
 
@@ -164,9 +165,18 @@ namespace rhi {
 		// applied seq to the slot's set in one vkUpdateDescriptorSets batch
 		// (idempotent; called from VulkanCommandList::BindGlobalSet).
 		void ApplyDescriptorLog(uint32_t slot);
+		// A window registers its slots' base when it allocates them (the
+		// GC floor's expected set); a closing window's slots deactivate
+		// so their stale seq can't pin the floor.
+		void NoteSlotExpected(uint32_t base);
+		void DeactivateWindowSlots(uint32_t base);
 		void QueueTextureForDestruction(VkImage image, VmaAllocation allocation,
-			VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex,
-			uint32_t extraSubmissions = 0u);
+			VkImageView imageView, VkSampler sampler, uint32_t bindlessIndex);
+		// The submit thread's record-start reset notification - the slot's
+		// command buffers (the last reference to the frame's resources)
+		// are freed here, so the retire entries tagged for this reset can
+		// free too.
+		void NoteSlotReset(uint32_t slot);
 		void QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex = ~0u);
 		void QueuePipelineForDestruction(VkPipeline pipeline, VkPipelineLayout layout);
 		void QueueShaderForDestruction(VkShaderModule shader);
@@ -314,7 +324,13 @@ namespace rhi {
 			enum class Kind : uint8_t { Texture, Buffer, Pipeline, Shader, Sampler };
 
 			Kind        Kind_ = Kind::Texture;
-			uint64_t    Stamp = 0;
+			// The frame-boundary tag - the entry frees once the SLOT's
+			// record-start resets (the NoteSlotReset bumps) reach the
+			// ResetTag. No timeline prediction (the old last-submitted+1
+			// stamp freed one submission early when an upload batch or
+			// another window's submit interleaved).
+			uint32_t    Slot = 0;
+			uint64_t    ResetTag = 0;
 			VkImage     Image = VK_NULL_HANDLE;
 			VmaAllocation Allocation = VK_NULL_HANDLE;
 			VkImageView ImageView = VK_NULL_HANDLE;
@@ -326,11 +342,11 @@ namespace rhi {
 			uint32_t    BindlessIndex = 0;
 			bool        HasBindlessIndex = false;
 			// P-F: the tombstone log write's seq (0 = none). The index is
-			// reusable only once the timeline passed the stamp AND every
+			// reusable only once the reset tag passed AND every
 			// slot's set has applied this seq.
 			uint64_t    TombstoneSeq = 0;
 		};
-		void QueueRetire(RetireEntry&& entry, uint32_t extraSubmissions = 0u);
+		void QueueRetire(RetireEntry&& entry);
 		void FreeRetireEntry(const RetireEntry& entry);
 
 		// The generation-checked handle table: fixed-slot objects + a
@@ -526,8 +542,24 @@ namespace rhi {
 		std::vector<DescriptorWriteLogEntry> m_DescriptorWriteLog;
 		uint64_t m_NextDescriptorSeq = 1;
 		uint64_t m_LastAppliedSeq[VulkanDevice::TotalFrameSlots] = {};
+		// The per-slot expected/activation flags - a window's slots register
+		// when the window allocates its slot base (NoteSlotExpected), and the GC
+		// floor takes the min over the EXPECTED slots only. The never-expected
+		// slots (the never-opened windows) stay out of the floor, and an
+		// expected slot that hasn't applied yet pins the floor at its seq 0 -
+		// the slot's first apply is the FULL rewrite of the log (the entries
+		// must stay until then). A closing window deactivates its slots
+		// (DeactivateWindowSlots).
+		bool m_SlotExpected[VulkanDevice::TotalFrameSlots] = {};
 		std::vector<std::pair<uint32_t, uint64_t>> m_PendingIndexReuse; // (index, tombstone seq)
 		mutable std::mutex m_DescriptorLogMutex;
+
+		// The apply-side scratch buffers (reused across applies instead
+		// of the old per-slot-per-frame three vector allocations at
+		// full-log size). Only touched under m_DescriptorLogMutex.
+		std::vector<VkWriteDescriptorSet> m_ApplyScratchWrites;
+		std::vector<VkDescriptorImageInfo> m_ApplyScratchImageInfos;
+		std::vector<VkDescriptorBufferInfo> m_ApplyScratchBufferInfos;
 
 		std::vector<uint32_t> m_FreeBindlessIndices;
 		uint32_t m_NextBindlessIndex = 0;
@@ -537,6 +569,10 @@ namespace rhi {
 		std::vector<uint32_t> m_FreeBindlessBufferIndices;
 		uint32_t m_NextBindlessBufferIndex = 0;
 		std::vector<RetireEntry> m_RetireQueue;
+		// The per-slot record-start reset counts (the submit thread's
+		// NoteSlotReset bumps them after the command buffers free) - the
+		// retire entries tag against them.
+		std::atomic<uint64_t> m_SlotResetCount[VulkanDevice::TotalFrameSlots] = {};
 
 		QueueHandle m_GraphicsQueue;
 	};
