@@ -1051,24 +1051,27 @@ namespace rhi {
 		const uint64_t lastApplied = m_LastAppliedSeq[slot];
 
 		// Collect the entries this slot hasn't applied yet (they are
-		// already in log order, seq ascending). The scratch buffers are
-		// reused across applies (the old form allocated three log-sized
-		// vectors per slot per frame).
+		// already in log order, seq ascending - the apply lower_bounds
+		// the monotonic seq instead of walking the whole log from 0).
+		// The scratch buffers are reused across applies (the old form
+		// allocated three log-sized vectors per slot per frame).
 		std::vector<VkWriteDescriptorSet>& writes = m_ApplyScratchWrites;
 		std::vector<VkDescriptorImageInfo>& imageInfos = m_ApplyScratchImageInfos;
 		std::vector<VkDescriptorBufferInfo>& bufferInfos = m_ApplyScratchBufferInfos;
 		writes.clear();
 		imageInfos.clear();
 		bufferInfos.clear();
-		writes.reserve(m_DescriptorWriteLog.size());
-		imageInfos.reserve(m_DescriptorWriteLog.size());
-		bufferInfos.reserve(m_DescriptorWriteLog.size());
+		const auto pendingBegin = std::lower_bound(m_DescriptorWriteLog.begin(), m_DescriptorWriteLog.end(), lastApplied,
+			[](const DescriptorWriteLogEntry& entry, uint64_t seq) { return entry.Seq <= seq; });
+		const size_t pendingCount = (size_t)(m_DescriptorWriteLog.end() - pendingBegin);
+		writes.reserve(pendingCount);
+		imageInfos.reserve(pendingCount);
+		bufferInfos.reserve(pendingCount);
 
 		uint64_t maxSeq = lastApplied;
-		for (const DescriptorWriteLogEntry& entry : m_DescriptorWriteLog)
+		for (auto it = pendingBegin; it != m_DescriptorWriteLog.end(); ++it)
 		{
-			if (entry.Seq <= lastApplied)
-				continue;
+			const DescriptorWriteLogEntry& entry = *it;
 
 			VkWriteDescriptorSet write{};
 			write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;

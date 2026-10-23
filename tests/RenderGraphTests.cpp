@@ -138,11 +138,6 @@ namespace rg_tests {
 			return handle;
 		}
 
-		rg::RenderGraph MakeGraph(rg::TransientTexturePool& pool)
-		{
-			return rg::RenderGraph(pool);
-		}
-
 	} // namespace
 
 	TEST_CASE("rendergraph: a reader is ordered after its writer")

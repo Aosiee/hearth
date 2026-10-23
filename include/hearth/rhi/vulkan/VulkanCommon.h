@@ -13,7 +13,14 @@
 // matching how the rest of the backend talks to Vulkan through volk.
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
+// The vendored header is not warning-clean under -Wall -Wextra
+// (silenced here - one site covers every Vulkan TU).
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 #include <vk_mem_alloc.h>
+#pragma GCC diagnostic pop
 
 #include <string>
 
