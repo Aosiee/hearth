@@ -1,5 +1,6 @@
 #include "tepch.h"
 #include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
+#include "Platform/Vulkan/RHI/PipelineCacheFile.h"
 #include "Platform/Vulkan/VulkanFrameContext.h" // GetRecordFrameIndex (the P-F slot pick)
 #include "Platform/Vulkan/VulkanContext.h" // GetMainVulkanContext->GetCurrentFrameSlot (the retire queue's slot tag)
 
@@ -187,6 +188,19 @@ namespace rhi {
 			case BufferState::Indirect:     return VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
 			}
 			return VK_ACCESS_2_NONE;
+		}
+
+		constexpr const char* kPipelineCachePath = "saved/cache/pipeline.bin";
+
+		PipelineCacheIdentity QueryPipelineCacheIdentity(VkPhysicalDevice physicalDevice)
+		{
+			VkPhysicalDeviceProperties props{};
+			vkGetPhysicalDeviceProperties(physicalDevice, &props);
+			PipelineCacheIdentity identity;
+			identity.VendorId = props.vendorID;
+			identity.DeviceId = props.deviceID;
+			memcpy(identity.CacheUuid, props.pipelineCacheUUID, sizeof(identity.CacheUuid));
+			return identity;
 		}
 
 	} // namespace
@@ -535,34 +549,46 @@ namespace rhi {
 		CreatePipelineCache();
 	}
 
-	// The driver pipeline cache (VkPipelineCache) - loaded from
-	// saved/cache/pipeline.bin when r.shader.pipelineCacheFile is on and
-	// the file's 16-byte header matches the driver's pipelineCacheUUID.
+	// The driver pipeline cache (VkPipelineCache), persisted to
+	// saved/cache/pipeline.bin when r.shader.pipelineCacheFile is on. A
+	// cache is disposable, so no file state may stop a launch - a rejected
+	// file is a cold start, and a blob the driver refuses (NVIDIA:
+	// VK_ERROR_UNKNOWN on a damaged body) too.
 	void VulkanRhiDevice::CreatePipelineCache()
 	{
 		VkPipelineCacheCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-		std::vector<uint8_t> blob;
+		std::vector<uint8_t> cached;
 		if (TinyEngine::cvars::r_shader_pipelineCacheFile.Get())
 		{
-			std::ifstream file("saved/cache/pipeline.bin", std::ios::binary);
+			std::ifstream file(kPipelineCachePath, std::ios::binary);
 			if (file.is_open())
 			{
-				std::vector<uint8_t> cached((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-				if (cached.size() > VK_UUID_SIZE)
+				cached.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+				const uint8_t* payload = nullptr;
+				size_t payloadSize = 0;
+				const PipelineCacheFileStatus status = ParsePipelineCacheFile(cached,
+					QueryPipelineCacheIdentity(m_Vulkan.GetPhysicalDevice()), payload, payloadSize);
+				if (status == PipelineCacheFileStatus::Ok)
 				{
-					VkPhysicalDeviceProperties props{};
-					vkGetPhysicalDeviceProperties(m_Vulkan.GetPhysicalDevice(), &props);
-					if (memcmp(cached.data(), props.pipelineCacheUUID, VK_UUID_SIZE) == 0)
-					{
-						blob.assign(cached.begin() + VK_UUID_SIZE, cached.end());
-						info.initialDataSize = blob.size();
-						info.pInitialData = blob.data();
-					}
+					info.initialDataSize = payloadSize;
+					info.pInitialData = payload;
 				}
+				else
+					TE_CORE_WARN(LogVulkan, "Pipeline cache: ignoring {0} ({1}), cold start.",
+						kPipelineCachePath, PipelineCacheFileStatusName(status));
 			}
 		}
-		VK_CHECK(vkCreatePipelineCache(m_Vulkan.GetDevice(), &info, nullptr, &m_VkPipelineCache));
+		VkResult result = vkCreatePipelineCache(m_Vulkan.GetDevice(), &info, nullptr, &m_VkPipelineCache);
+		if (result != VK_SUCCESS && info.initialDataSize != 0)
+		{
+			TE_CORE_WARN(LogVulkan, "Pipeline cache: the driver refused {0} (VkResult {1}), cold start.",
+				kPipelineCachePath, (int)result);
+			info.initialDataSize = 0;
+			info.pInitialData = nullptr;
+			result = vkCreatePipelineCache(m_Vulkan.GetDevice(), &info, nullptr, &m_VkPipelineCache);
+		}
+		VK_CHECK(result);
 	}
 
 	void VulkanRhiDevice::SavePipelineCache()
@@ -577,19 +603,14 @@ namespace rhi {
 		}
 		size_t size = 0;
 		VK_CHECK(vkGetPipelineCacheData(m_Vulkan.GetDevice(), m_VkPipelineCache, &size, nullptr));
-		std::vector<uint8_t> blob(VK_UUID_SIZE + size);
-		VkPhysicalDeviceProperties props{};
-		vkGetPhysicalDeviceProperties(m_Vulkan.GetPhysicalDevice(), &props);
-		memcpy(blob.data(), props.pipelineCacheUUID, VK_UUID_SIZE);
+		std::vector<uint8_t> blob(size);
 		if (size > 0)
-			VK_CHECK(vkGetPipelineCacheData(m_Vulkan.GetDevice(), m_VkPipelineCache, &size, blob.data() + VK_UUID_SIZE));
+			VK_CHECK(vkGetPipelineCacheData(m_Vulkan.GetDevice(), m_VkPipelineCache, &size, blob.data()));
 		vkDestroyPipelineCache(m_Vulkan.GetDevice(), m_VkPipelineCache, nullptr);
 		m_VkPipelineCache = VK_NULL_HANDLE;
-		std::error_code ec;
-		std::filesystem::create_directories("saved/cache", ec);
-		std::ofstream file("saved/cache/pipeline.bin", std::ios::binary | std::ios::trunc);
-		if (file.is_open())
-			file.write((const char*)blob.data(), (std::streamsize)blob.size());
+		if (!WritePipelineCacheFileAtomic(kPipelineCachePath,
+			BuildPipelineCacheFile(blob.data(), size, QueryPipelineCacheIdentity(m_Vulkan.GetPhysicalDevice()))))
+			TE_CORE_WARN(LogVulkan, "Pipeline cache: could not write {0}, the next launch is a cold start.", kPipelineCachePath);
 	}
 
 	// The two fixed samplers Wisp picks from. Baked with Wisp's EXACT
@@ -1528,6 +1549,12 @@ namespace rhi {
 	{
 		if (VulkanBuffer* buffer = m_Buffers.Get(handle))
 			buffer->SetData(data, size, offset);
+	}
+
+	const void* VulkanRhiDevice::GetBufferMappedData(BufferHandle handle)
+	{
+		VulkanBuffer* buffer = m_Buffers.Get(handle);
+		return buffer ? buffer->GetMappedData() : nullptr;
 	}
 
 	void VulkanRhiDevice::UploadBufferViaStaging(BufferHandle handle, const void* data, uint64_t size)

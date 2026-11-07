@@ -218,6 +218,8 @@ namespace rhi {
 		// BufferHandles; DestroyBuffer on it releases the slot only.
 		BufferHandle AdoptExternalBuffer(VkBuffer buffer, VmaAllocation allocation);
 		void SetBufferData(BufferHandle handle, const void* data, uint64_t size, uint64_t offset = 0) override;
+		// The capture sidecar's read of a host-visible buffer (null otherwise).
+		const void* GetBufferMappedData(BufferHandle handle);
 		// The bindless storage-buffer write (binding 1).
 		void WriteBindlessBuffer(uint32_t index, BufferHandle handle) override;
 		void UploadBufferViaStaging(BufferHandle handle, const void* data, uint64_t size) override;
