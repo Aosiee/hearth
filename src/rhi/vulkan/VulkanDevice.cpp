@@ -3,6 +3,7 @@
 #include "Platform/Vulkan/VulkanFrameContext.h"
 #include "TinyEngine/Debug/GpuFrameDebugData.h"
 #include "TinyEngine/Debug/Profiler.h"
+#include "TinyEngine/Core/CrashHandler.h"
 
 #include "loom.h"
 
@@ -424,6 +425,10 @@ namespace TinyEngine {
 		m_DeviceName = properties.deviceName;
 		m_DriverVersion = properties.driverVersion;
 		m_ApiVersion = properties.apiVersion;
+		// The GPU in every crash report.
+		char driver[16];
+		std::snprintf(driver, sizeof(driver), "0x%08x", properties.driverVersion);
+		CrashHandler::SetGpu(properties.deviceName, driver);
 
 		// Needed to convert GPU timestamp query results (raw ticks) into
 		// milliseconds for the GPU frame debugger. timestampValidBits == 0 on
