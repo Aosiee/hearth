@@ -747,12 +747,20 @@ namespace TinyEngine {
 		}
 	}
 
-	uint32_t VulkanDevice::AllocateWindowSlot()
+	uint32_t VulkanDevice::AllocateWindowSlot(VulkanContext* owner)
 	{
 		TE_CORE_ASSERT(m_NextWindowSlot < MaxWindowSlots, "More windows than VulkanDevice::MaxWindowSlots allows!");
 		uint32_t base = m_NextWindowSlot * FramesInFlight;
+		m_WindowContexts[m_NextWindowSlot] = owner;
 		m_NextWindowSlot++;
 		return base;
+	}
+
+	void VulkanDevice::ReleaseWindowSlot(uint32_t slotBase)
+	{
+		const uint32_t slot = slotBase / FramesInFlight;
+		TE_CORE_ASSERT(slot < MaxWindowSlots, "ReleaseWindowSlot with an out-of-range slot base");
+		m_WindowContexts[slot] = nullptr;
 	}
 
 	VkCommandBuffer VulkanDevice::BeginSingleTimeCommands() const

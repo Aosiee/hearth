@@ -4,12 +4,15 @@
 
 #include "Platform/Vulkan/VulkanCommon.h"
 
+#include <array>
 #include <atomic>
 #include <mutex>
 
 struct GLFWwindow;
 
 namespace TinyEngine {
+
+	class VulkanContext;
 
 	// Owns everything about the Vulkan backend that exists once for the whole
 	// application: the instance, the physical/logical device pair, the
@@ -46,7 +49,15 @@ namespace TinyEngine {
 		// (slotIndex * FramesInFlight). Must be called between frames (a
 		// window's VulkanContext::Init), never while another window's
 		// submission is in flight. Asserts when the cap is exceeded.
-		uint32_t AllocateWindowSlot();
+		// The slot records its owning context until ReleaseWindowSlot (the
+		// context's destructor), so the game-thread parks can wait EVERY
+		// live window, not only the main one. The slot itself is not
+		// recycled (the cap counts every window the process ever opened).
+		uint32_t AllocateWindowSlot(VulkanContext* owner);
+		void ReleaseWindowSlot(uint32_t slotBase);
+		// The live window contexts, indexed by window slot (null = never
+		// allocated or released). Game-thread-only, like the allocation.
+		const std::array<VulkanContext*, MaxWindowSlots>& GetLiveWindowContexts() const { return m_WindowContexts; }
 
 		// windowForExtensionQuery is only used to ask GLFW which instance extensions
 		// this windowing system needs (X11/Wayland/Win32 surface support etc). No
@@ -223,6 +234,7 @@ namespace TinyEngine {
 		std::atomic<uint64_t> m_TimelineValue{ 0 };
 
 		uint32_t m_NextWindowSlot = 0;
+		std::array<VulkanContext*, MaxWindowSlots> m_WindowContexts{};
 
 		bool m_ValidationEnabled = false;
 		bool m_SamplerAnisotropySupported = false;
