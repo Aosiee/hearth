@@ -1,5 +1,7 @@
 #pragma once
 
+#include "TinyEngine/Debug/Profiler.h"
+
 #include "Platform/Vulkan/VulkanCommon.h"
 
 #include <atomic>
@@ -252,6 +254,23 @@ namespace TinyEngine {
 
 		bool m_TimestampsSupported = false;
 		float m_TimestampPeriodNs = 1.0f;
+		uint64_t m_TimestampMask = ~0ull; // timestampValidBits
+
+		// The device clock calibrated against the profiler's steady clock
+		// (VK_KHR/EXT_calibrated_ timestamps), resampled every
+		// kCalibrationInterval readbacks. Without the extension (or a
+		// matching host domain) the passes go out on the device clock and
+		// the timeline anchors them.
+		static constexpr uint32_t kCalibrationInterval = 64;
+		const char* m_CalibrationExtension = nullptr; // enabled at device creation
+		VkTimeDomainKHR m_HostTimeDomain = VK_TIME_DOMAIN_DEVICE_KHR;
+		PFN_vkGetCalibratedTimestampsKHR m_GetCalibratedTimestamps = nullptr;
+		bool m_GpuClockValid = false;
+		GpuClockMapping m_GpuClock;
+		uint32_t m_CalibrationCountdown = 0;
+		double m_GpuPeriodEstimate = 0.0; // the measured ns per tick (0 = not yet)
+		void DetectCalibratedTimestamps();
+		void CalibrateGpuClock();
 		uint32_t m_MaxPushConstantsSize = 128;
 		// The capture sidecar's GPU identity (the CI golden-source
 		// policy keys on it).

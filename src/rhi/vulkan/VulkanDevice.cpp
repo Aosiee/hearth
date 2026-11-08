@@ -129,6 +129,11 @@ namespace TinyEngine {
 		PickPhysicalDevice();
 		CreateLogicalDevice();
 		volkLoadDevice(m_Device);
+		if (m_CalibrationExtension != nullptr)
+		{
+			m_GetCalibratedTimestamps = (std::strcmp(m_CalibrationExtension, VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) == 0)
+				? vkGetCalibratedTimestampsKHR : (PFN_vkGetCalibratedTimestampsKHR)vkGetCalibratedTimestampsEXT;
+		}
 
 		CreateAllocator();
 		CreateCommandPools();
@@ -437,6 +442,121 @@ namespace TinyEngine {
 		std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
 		vkGetPhysicalDeviceQueueFamilyProperties(m_PhysicalDevice, &queueFamilyCount, queueFamilies.data());
 		m_TimestampsSupported = queueFamilies[m_GraphicsQueueFamily].timestampValidBits > 0;
+		const uint32_t validBits = queueFamilies[m_GraphicsQueueFamily].timestampValidBits;
+		m_TimestampMask = (validBits == 0 || validBits >= 64) ? ~0ull : ((1ull << validBits) - 1ull);
+		DetectCalibratedTimestamps();
+	}
+
+	void VulkanDevice::DetectCalibratedTimestamps()
+	{
+#if !defined(TE_CONF_DIST)
+		if (!m_TimestampsSupported)
+			return;
+		uint32_t count = 0;
+		vkEnumerateDeviceExtensionProperties(m_PhysicalDevice, nullptr, &count, nullptr);
+		std::vector<VkExtensionProperties> available(count);
+		vkEnumerateDeviceExtensionProperties(m_PhysicalDevice, nullptr, &count, available.data());
+		auto has = [&](const char* name) {
+			return std::any_of(available.begin(), available.end(),
+				[&](const VkExtensionProperties& e) { return std::strcmp(e.extensionName, name) == 0; });
+		};
+		PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR getDomains = nullptr;
+		if (has(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) && vkGetPhysicalDeviceCalibrateableTimeDomainsKHR)
+		{
+			m_CalibrationExtension = VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+			getDomains = vkGetPhysicalDeviceCalibrateableTimeDomainsKHR;
+		}
+		else if (has(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) && vkGetPhysicalDeviceCalibrateableTimeDomainsEXT)
+		{
+			m_CalibrationExtension = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+			getDomains = vkGetPhysicalDeviceCalibrateableTimeDomainsEXT;
+		}
+		if (getDomains == nullptr)
+		{
+			TE_CORE_INFO(LogVulkan, "Profiler: calibrated timestamps unsupported; the GPU lane is anchored (uncalibrated).");
+			return;
+		}
+		uint32_t domainCount = 0;
+		getDomains(m_PhysicalDevice, &domainCount, nullptr);
+		std::vector<VkTimeDomainKHR> domains(domainCount);
+		getDomains(m_PhysicalDevice, &domainCount, domains.data());
+		// The profiler's clock is std::chrono::steady_clock: CLOCK_MONOTONIC
+		// on Linux (libstdc++/libc++), QueryPerformanceCounter on Windows.
+#if defined(_WIN32)
+		const VkTimeDomainKHR host = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_KHR;
+#else
+		const VkTimeDomainKHR host = VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR;
+#endif
+		const bool hasDevice = std::find(domains.begin(), domains.end(), VK_TIME_DOMAIN_DEVICE_KHR) != domains.end();
+		const bool hasHost = std::find(domains.begin(), domains.end(), host) != domains.end();
+		if (!hasDevice || !hasHost)
+		{
+			TE_CORE_INFO(LogVulkan, "Profiler: {} lacks the device + steady-clock domains; the GPU lane is anchored (uncalibrated).", m_CalibrationExtension);
+			m_CalibrationExtension = nullptr;
+			return;
+		}
+		m_HostTimeDomain = host;
+#endif // !TE_CONF_DIST
+	}
+
+	void VulkanDevice::CalibrateGpuClock()
+	{
+#if !defined(TE_CONF_DIST)
+		VkCalibratedTimestampInfoKHR infos[2]{};
+		infos[0].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
+		infos[0].timeDomain = VK_TIME_DOMAIN_DEVICE_KHR;
+		infos[1].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
+		infos[1].timeDomain = m_HostTimeDomain;
+		uint64_t values[2] = {};
+		uint64_t maxDeviation = 0;
+		if (m_GetCalibratedTimestamps(m_Device, 2, infos, values, &maxDeviation) != VK_SUCCESS)
+			return;
+		// A preempted sample (a wide bracket) is noise: keep the previous one.
+		if (m_GpuClockValid && maxDeviation > 10000)
+			return;
+
+		uint64_t hostNs = values[1];
+#if defined(_WIN32)
+		LARGE_INTEGER frequency;
+		QueryPerformanceFrequency(&frequency);
+		const uint64_t f = (uint64_t)frequency.QuadPart;
+		hostNs = (values[1] / f) * 1000000000ull + (values[1] % f) * 1000000000ull / f;
+#endif
+		GpuClockMapping next;
+		next.DeviceTick = values[0] & m_TimestampMask;
+		next.CpuNs = hostNs;
+		next.PeriodNs = (double)m_TimestampPeriodNs;
+		next.TickMask = m_TimestampMask;
+		double errorNs = 0.0;
+		if (m_GpuClockValid)
+		{
+			// The device clock runs a few ppm off its nominal period against
+			// the steady clock (6.6 ppm measured on the RTX 3080 Ti, 2 ms
+			// over 5 minutes). The rate is learned from the sample pairs
+			// (smoothed: each sample carries ~2 us of bracket jitter), so a
+			// pass between samples is placed by the measured rate.
+			const uint64_t ticks = (next.DeviceTick - m_GpuClock.DeviceTick) & m_TimestampMask;
+			const double cpuNs = (double)next.CpuNs - (double)m_GpuClock.CpuNs;
+			if (ticks > 0 && cpuNs > 2.0e8)
+			{
+				const double measured = cpuNs / (double)ticks;
+				m_GpuPeriodEstimate = (m_GpuPeriodEstimate > 0.0) ? 0.9 * m_GpuPeriodEstimate + 0.1 * measured : measured;
+			}
+			// The residual: where the previous mapping put this instant.
+			errorNs = (double)next.CpuNs - (double)m_GpuClock.ToCpuNs(next.DeviceTick);
+		}
+		else
+		{
+			TE_CORE_INFO(LogVulkan, "Profiler: GPU timestamps calibrated ({}, max deviation {} ns).", m_CalibrationExtension, maxDeviation);
+		}
+		if (m_GpuPeriodEstimate > 0.0)
+			next.PeriodNs = m_GpuPeriodEstimate;
+		m_GpuClock = next;
+		m_GpuClockValid = true;
+		TinyEngine::Profiler::Get().PlotValue("GPU clock error (us)", errorNs / 1000.0);
+		TinyEngine::Profiler::Get().PlotValue("GPU clock rate (ppm)",
+			(m_GpuPeriodEstimate > 0.0 ? m_GpuPeriodEstimate / (double)m_TimestampPeriodNs - 1.0 : 0.0) * 1.0e6);
+#endif // !TE_CONF_DIST
 	}
 
 	void VulkanDevice::CreateLogicalDevice()
@@ -502,15 +622,18 @@ namespace TinyEngine {
 
 		// The Offscreen mode omits the swapchain extension (no
 		// surface).
-		const char* deviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+		std::vector<const char*> deviceExtensions;
+		if (m_SurfaceEnabled)
+			deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+		if (m_CalibrationExtension != nullptr)
+			deviceExtensions.push_back(m_CalibrationExtension);
 		VkDeviceCreateInfo createInfo{};
 		createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 		createInfo.pNext = &features2;
 		createInfo.queueCreateInfoCount = 1;
 		createInfo.pQueueCreateInfos = &queueCreateInfo;
-		createInfo.enabledExtensionCount = m_SurfaceEnabled
-			? (uint32_t)(sizeof(deviceExtensions) / sizeof(deviceExtensions[0])) : 0u;
-		createInfo.ppEnabledExtensionNames = m_SurfaceEnabled ? deviceExtensions : nullptr;
+		createInfo.enabledExtensionCount = (uint32_t)deviceExtensions.size();
+		createInfo.ppEnabledExtensionNames = deviceExtensions.empty() ? nullptr : deviceExtensions.data();
 		// pEnabledFeatures is deliberately left null, the feature chain above (via
 		// pNext) is how features are requested when using VkPhysicalDeviceFeatures2.
 
@@ -948,6 +1071,11 @@ namespace TinyEngine {
 			if (result == VK_SUCCESS)
 			{
 #if !defined(TE_CONF_DIST)
+				if (m_GetCalibratedTimestamps != nullptr && m_CalibrationCountdown-- == 0)
+				{
+					CalibrateGpuClock();
+					m_CalibrationCountdown = kCalibrationInterval - 1;
+				}
 				debugInfo.PassTimings.clear();
 				// The profiler's GPU lane: the tick pairs + the
 				// originating frame, in the device-ns domain (the viewer
@@ -964,10 +1092,16 @@ namespace TinyEngine {
 						debugInfo.PassTimings.push_back({ scope.Name, ms });
 
 #if !defined(TE_CONF_DIST)
-						TinyEngine::Profiler::Get().GpuPassPair(0,
-							(uint64_t)((double)timestamps[scope.BeginQuery] * m_TimestampPeriodNs),
-							(uint64_t)((double)timestamps[scope.EndQuery] * m_TimestampPeriodNs),
-							scope.ProfilerFrameIndex, scope.Name.c_str());
+						if (m_GpuClockValid)
+							TinyEngine::Profiler::Get().GpuPassPair(0,
+								m_GpuClock.ToCpuNs(timestamps[scope.BeginQuery] & m_TimestampMask),
+								m_GpuClock.ToCpuNs(timestamps[scope.EndQuery] & m_TimestampMask),
+								scope.ProfilerFrameIndex, scope.Name.c_str(), true);
+						else
+							TinyEngine::Profiler::Get().GpuPassPair(0,
+								(uint64_t)((double)timestamps[scope.BeginQuery] * m_TimestampPeriodNs),
+								(uint64_t)((double)timestamps[scope.EndQuery] * m_TimestampPeriodNs),
+								scope.ProfilerFrameIndex, scope.Name.c_str());
 #endif // !TE_CONF_DIST
 					}
 				}
