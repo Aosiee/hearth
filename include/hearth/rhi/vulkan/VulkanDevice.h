@@ -238,6 +238,9 @@ namespace TinyEngine {
 		// generous rather than minimal. The per-frame query pools are sized
 		// from it and are cheap.
 		static constexpr uint32_t kMaxTimestampsPerFrame = 1024;
+		static constexpr uint32_t kNoTimestampSlot = ~0u; // a label recorded without timing (A10)
+		std::atomic<bool> m_TimestampOverflowWarned{ false };
+		void NoteTimestampOverflow();
 
 		struct GpuScopeRecord
 		{

@@ -842,10 +842,21 @@ namespace TinyEngine {
 
 			// T-F-B.3: the slot counter is per frame + atomic (the parallel
 			// record workers allocate concurrently); fetch_add keeps the used
-			// prefix contiguous for the single-range readback.
+			// prefix contiguous for the single-range readback. Running out of
+			// slots is a counted, recoverable condition - the label still
+			// records, only its timing is skipped (the sentinel on the scope
+			// stack). The old assert crashed the dev editor on any frame with
+			// ~500+ labelled scopes (Wisp labels every draw batch - the
+			// profiler panel at deep zoom), and builds without asserts wrote
+			// past the query pool.
 			uint32_t slot = m_NextQuerySlot[frameIndex].fetch_add(1, std::memory_order_relaxed);
-			TE_CORE_ASSERT(slot < kMaxTimestampsPerFrame, "GPU frame debugger ran out of timestamp query slots this frame, raise VulkanDevice::kMaxTimestampsPerFrame!");
-			vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, m_TimestampPools[frameIndex], slot);
+			if (slot < kMaxTimestampsPerFrame)
+				vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, m_TimestampPools[frameIndex], slot);
+			else
+			{
+				NoteTimestampOverflow();
+				slot = kNoTimestampSlot;
+			}
 
 			// The begin/end pairing is always recorded by one worker, so the
 			// scope stacks are per (frame, record thread).
@@ -872,21 +883,35 @@ namespace TinyEngine {
 			// empty stack if that's ever not true.
 			if (!m_ScopeBeginStack[threadKey].empty())
 			{
-				uint32_t endSlot = m_NextQuerySlot[frameIndex].fetch_add(1, std::memory_order_relaxed);
-				TE_CORE_ASSERT(endSlot < kMaxTimestampsPerFrame, "GPU frame debugger ran out of timestamp query slots this frame, raise VulkanDevice::kMaxTimestampsPerFrame!");
-				vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, m_TimestampPools[frameIndex], endSlot);
-
 				uint32_t beginSlot = m_ScopeBeginStack[threadKey].back();
 				m_ScopeBeginStack[threadKey].pop_back();
 				std::string scopeName = m_ScopeNameStack[threadKey].back();
 				m_ScopeNameStack[threadKey].pop_back();
 
+				// A10: an untimed begin stays untimed; an end that finds no
+				// slot drops the scope's timing (never a write past the pool).
+				uint32_t endSlot = kNoTimestampSlot;
+				if (beginSlot != kNoTimestampSlot)
+				{
+					endSlot = m_NextQuerySlot[frameIndex].fetch_add(1, std::memory_order_relaxed);
+					if (endSlot < kMaxTimestampsPerFrame)
+						vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, m_TimestampPools[frameIndex], endSlot);
+					else
+					{
+						NoteTimestampOverflow();
+						endSlot = kNoTimestampSlot;
+					}
+				}
+
+				if (endSlot != kNoTimestampSlot)
+				{
 #if !defined(TE_CONF_DIST)
-				uint32_t profilerFrame = TinyEngine::Profiler::Get().CurrentFrameIndex();
+					uint32_t profilerFrame = TinyEngine::Profiler::Get().CurrentFrameIndex();
 #else
-				uint32_t profilerFrame = 0;
+					uint32_t profilerFrame = 0;
 #endif // !TE_CONF_DIST
-				m_RecordedScopes[threadKey].push_back({ scopeName, beginSlot, endSlot, profilerFrame });
+					m_RecordedScopes[threadKey].push_back({ scopeName, beginSlot, endSlot, profilerFrame });
+				}
 			}
 		}
 
@@ -904,7 +929,8 @@ namespace TinyEngine {
 		std::lock_guard lock(GpuFrameDebugInfoMutex());
 #endif // !TE_CONF_DIST
 
-		uint32_t queryCount = m_NextQuerySlot[frameIndex].load(std::memory_order_relaxed);
+		// The counter keeps counting past the pool on an overflow frame (A10).
+		uint32_t queryCount = std::min(m_NextQuerySlot[frameIndex].load(std::memory_order_relaxed), kMaxTimestampsPerFrame);
 
 		if (isMainWindow && m_TimestampsSupported && queryCount > 0)
 		{
@@ -996,6 +1022,15 @@ namespace TinyEngine {
 			"the loom thread index exceeds the record pool count");
 		return (uint32_t)index < m_RecordThreadCount ? (uint32_t)index : m_RecordThreadCount - 1;
 	}
+
+#if !defined(TE_CONF_DIST)
+	void VulkanDevice::NoteTimestampOverflow()
+	{
+		if (!m_TimestampOverflowWarned.exchange(true, std::memory_order_relaxed))
+			TE_CORE_WARN(LogVulkan, "GPU timestamps: a frame recorded more than {0} timed scopes - the extra scopes keep their labels but go untimed (warned once).",
+				kMaxTimestampsPerFrame / 2);
+	}
+#endif // !TE_CONF_DIST
 
 	void VulkanDevice::CmdResetTimestampPool(VkCommandBuffer commandBuffer, uint32_t frameIndex)
 	{
