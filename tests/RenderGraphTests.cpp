@@ -119,7 +119,7 @@ namespace rg_tests {
 		void CopyBufferToBuffer(rhi::BufferHandle, rhi::BufferHandle, uint64_t, uint64_t, uint64_t) override {}
 		void CopyBufferToTexture(rhi::BufferHandle, rhi::TextureHandle, uint32_t, uint32_t) override {}
 		void CopyTextureToBuffer(rhi::TextureHandle, rhi::BufferHandle, uint32_t, uint32_t) override {}
-		void BeginLabel(const char*) override {}
+		void BeginLabel(const char*, bool) override {}
 		void EndLabel() override {}
 		void WriteTimestamp(uint32_t) override {}
 	};

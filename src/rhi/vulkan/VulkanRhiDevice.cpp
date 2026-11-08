@@ -486,9 +486,9 @@ namespace rhi {
 			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_Device->GetBufferHandle(dst), 1, &region);
 	}
 
-	void VulkanCommandList::BeginLabel(const char* name)
+	void VulkanCommandList::BeginLabel(const char* name, bool timed)
 	{
-		m_Device->GetVulkan()->CmdBeginDebugLabel(m_CommandBuffer, name);
+		m_Device->GetVulkan()->CmdBeginDebugLabel(m_CommandBuffer, name, nullptr, timed);
 	}
 
 	void VulkanCommandList::EndLabel()

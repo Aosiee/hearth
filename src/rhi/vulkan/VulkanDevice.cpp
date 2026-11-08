@@ -937,7 +937,7 @@ namespace TinyEngine {
 		(void)type; (void)handle; (void)name;
 	}
 
-	void VulkanDevice::CmdBeginDebugLabel(VkCommandBuffer commandBuffer, const std::string& name, const float colour[4])
+	void VulkanDevice::CmdBeginDebugLabel(VkCommandBuffer commandBuffer, const std::string& name, const float colour[4], bool timed)
 	{
 #if !defined(TE_CONF_DIST)
 		if (m_ValidationEnabled && vkCmdBeginDebugUtilsLabelEXT)
@@ -971,14 +971,20 @@ namespace TinyEngine {
 			// stack). The old assert crashed the dev editor on any frame with
 			// ~500+ labelled scopes (Wisp labels every draw batch - the
 			// profiler panel at deep zoom), and builds without asserts wrote
-			// past the query pool.
-			uint32_t slot = m_NextQuerySlot[frameIndex].fetch_add(1, std::memory_order_relaxed);
-			if (slot < kMaxTimestampsPerFrame)
-				vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, m_TimestampPools[frameIndex], slot);
-			else
+			// past the query pool. An untimed label (F1) takes the same
+			// sentinel, so the stack stays paired and its end writes no
+			// timestamp either.
+			uint32_t slot = kNoTimestampSlot;
+			if (timed)
 			{
-				NoteTimestampOverflow();
-				slot = kNoTimestampSlot;
+				slot = m_NextQuerySlot[frameIndex].fetch_add(1, std::memory_order_relaxed);
+				if (slot < kMaxTimestampsPerFrame)
+					vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, m_TimestampPools[frameIndex], slot);
+				else
+				{
+					NoteTimestampOverflow();
+					slot = kNoTimestampSlot;
+				}
 			}
 
 			// The begin/end pairing is always recorded by one worker, so the
@@ -988,7 +994,7 @@ namespace TinyEngine {
 			m_ScopeNameStack[threadKey].push_back(name);
 		}
 #endif // !TE_CONF_DIST
-		(void)commandBuffer; (void)name; (void)colour;
+		(void)commandBuffer; (void)name; (void)colour; (void)timed;
 	}
 
 	void VulkanDevice::CmdEndDebugLabel(VkCommandBuffer commandBuffer)

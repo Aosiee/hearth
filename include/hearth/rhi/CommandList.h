@@ -81,7 +81,10 @@ namespace rhi {
 		virtual void CopyTextureToBuffer(TextureHandle src, BufferHandle dst,
 			uint32_t width, uint32_t height) = 0;
 
-		virtual void BeginLabel(const char* name) = 0;
+		// timed = false: a debug label only (RenderDoc/Nsight), no GPU
+		// timestamp pair - for fine-grained labels whose individual timing
+		// would be noise and would use up the per-frame timestamp pool.
+		virtual void BeginLabel(const char* name, bool timed = true) = 0;
 		virtual void EndLabel() = 0;
 		virtual void WriteTimestamp(uint32_t queryIndex) = 0;
 	};

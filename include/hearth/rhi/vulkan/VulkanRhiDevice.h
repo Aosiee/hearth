@@ -74,7 +74,7 @@ namespace rhi {
 			uint32_t width, uint32_t height) override;
 		void CopyTextureToBuffer(TextureHandle src, BufferHandle dst,
 			uint32_t width, uint32_t height) override;
-		void BeginLabel(const char* name) override;
+		void BeginLabel(const char* name, bool timed = true) override;
 		void EndLabel() override;
 		void WriteTimestamp(uint32_t queryIndex) override;
 

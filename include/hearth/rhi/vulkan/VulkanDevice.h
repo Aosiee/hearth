@@ -118,7 +118,9 @@ namespace TinyEngine {
 		// as a group in RenderDoc/Nsight captures. Also where GPU timing for the
 		// in-editor GPU frame debugger comes from - every Begin/End call site
 		// gets per-pass GPU timestamps.
-		void CmdBeginDebugLabel(VkCommandBuffer commandBuffer, const std::string& name, const float colour[4] = nullptr);
+		// timed = false records the label without a timestamp pair (the
+		// scope stack carries the no-slot sentinel, as on an overflow).
+		void CmdBeginDebugLabel(VkCommandBuffer commandBuffer, const std::string& name, const float colour[4] = nullptr, bool timed = true);
 		void CmdEndDebugLabel(VkCommandBuffer commandBuffer);
 
 		// Call once per application frame, right after that frame-in-flight
