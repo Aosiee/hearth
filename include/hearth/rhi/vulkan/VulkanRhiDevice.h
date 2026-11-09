@@ -177,6 +177,11 @@ namespace rhi {
 		// are freed here, so the retire entries tagged for this reset can
 		// free too.
 		void NoteSlotReset(uint32_t slot);
+		// A retire entry frees at the slot's Nth reset after it was queued
+		// (QueueRetire tags it count + this). A releasing slot's owner calls
+		// NoteSlotReset this many times once its GPU work is done, so every
+		// entry still tagged to the slot frees.
+		static constexpr uint64_t kRetireResetDistance = 2;
 		void QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex = ~0u);
 		void QueuePipelineForDestruction(VkPipeline pipeline, VkPipelineLayout layout);
 		void QueueShaderForDestruction(VkShaderModule shader);
@@ -313,6 +318,10 @@ namespace rhi {
 			VkImageLayout  ImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 			VkBuffer       Buffer = VK_NULL_HANDLE;
 		};
+
+		// Mirrors a log append into the per-index current-descriptor table
+		// (m_DescriptorLogMutex held).
+		void RecordCurrentDescriptor(const DescriptorWriteLogEntry& entry);
 
 		// The oldest applied seq across all slots - the log-entry GC and
 		// the tombstone-recycle floor (callers hold m_DescriptorLogMutex).
@@ -544,15 +553,28 @@ namespace rhi {
 		std::vector<DescriptorWriteLogEntry> m_DescriptorWriteLog;
 		uint64_t m_NextDescriptorSeq = 1;
 		uint64_t m_LastAppliedSeq[VulkanDevice::TotalFrameSlots] = {};
-		// The per-slot expected/activation flags - a window's slots register
-		// when the window allocates its slot base (NoteSlotExpected), and the GC
-		// floor takes the min over the EXPECTED slots only. The never-expected
-		// slots (the never-opened windows) stay out of the floor, and an
-		// expected slot that hasn't applied yet pins the floor at its seq 0 -
-		// the slot's first apply is the FULL rewrite of the log (the entries
-		// must stay until then). A closing window deactivates its slots
+		// The per-slot expected/activation flags: a window's slots register
+		// when the window allocates its slot base (NoteSlotExpected), and the
+		// GC floor takes the min over the EXPECTED slots only. The
+		// never-expected slots (the never-opened windows) stay out of the
+		// floor (a min over every slot never moved: the log grew forever and
+		// tombstoned indices never recycled), and an expected slot that
+		// hasn't applied yet pins the floor at its seq 0 until its first
+		// apply (the re-seed below). A closing window deactivates its slots
 		// (DeactivateWindowSlots).
 		bool m_SlotExpected[VulkanDevice::TotalFrameSlots] = {};
+		// The latest log entry per bindless index (textures: binding 0,
+		// buffers: binding 1; Seq 0 = never written), the tombstones of
+		// indices pending reuse included. Every append to the log is
+		// mirrored here and the GC never drops from it, so a slot that
+		// becomes expected mid-session (or is recycled) re-seeds its set
+		// from it at its first apply instead of replaying only the log's
+		// tail. Guarded by m_DescriptorLogMutex.
+		std::vector<DescriptorWriteLogEntry> m_CurrentTextureDescriptors;
+		std::vector<DescriptorWriteLogEntry> m_CurrentBufferDescriptors;
+		// False until a slot's first apply (and again from NoteSlotExpected):
+		// that apply is the full re-seed from the tables above.
+		bool m_SlotSeeded[VulkanDevice::TotalFrameSlots] = {};
 		std::vector<std::pair<uint32_t, uint64_t>> m_PendingIndexReuse; // (index, tombstone seq)
 		mutable std::mutex m_DescriptorLogMutex;
 
@@ -562,6 +584,9 @@ namespace rhi {
 		std::vector<VkWriteDescriptorSet> m_ApplyScratchWrites;
 		std::vector<VkDescriptorImageInfo> m_ApplyScratchImageInfos;
 		std::vector<VkDescriptorBufferInfo> m_ApplyScratchBufferInfos;
+		// The entries one apply writes (the log's tail, or the re-seed
+		// tables).
+		std::vector<const DescriptorWriteLogEntry*> m_ApplyScratchEntries;
 
 		std::vector<uint32_t> m_FreeBindlessIndices;
 		uint32_t m_NextBindlessIndex = 0;

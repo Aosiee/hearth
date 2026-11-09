@@ -45,16 +45,20 @@ namespace TinyEngine {
 		// Hardware concurrency, capped at 16, fixed at Init.
 		static constexpr uint32_t MaxRecordThreads = 16;
 
-		// Reserves the next window slot and returns its base frame index
+		// Reserves the lowest free window slot and returns its base frame index
 		// (slotIndex * FramesInFlight). Must be called between frames (a
 		// window's VulkanContext::Init), never while another window's
-		// submission is in flight. Asserts when the cap is exceeded.
+		// submission is in flight. Asserts when every slot is claimed.
 		// The slot records its owning context until ReleaseWindowSlot (the
-		// context's destructor), so the game-thread parks can wait EVERY
-		// live window, not only the main one. The slot itself is not
-		// recycled (the cap counts every window the process ever opened).
+		// context's destructor), so the game-thread parks can wait EVERY live
+		// window, not only the main one.
+		// A released slot is handed out again only after RecycleWindowSlot -
+		// the old owner's destructor calls it once its last GPU work has
+		// completed and its command buffers are freed - so the cap counts the
+		// LIVE windows. The lowest free slot is taken.
 		uint32_t AllocateWindowSlot(VulkanContext* owner);
 		void ReleaseWindowSlot(uint32_t slotBase);
+		void RecycleWindowSlot(uint32_t slotBase);
 		// The live window contexts, indexed by window slot (null = never
 		// allocated or released). Game-thread-only, like the allocation.
 		const std::array<VulkanContext*, MaxWindowSlots>& GetLiveWindowContexts() const { return m_WindowContexts; }
@@ -233,7 +237,8 @@ namespace TinyEngine {
 		VkSemaphore m_TimelineSemaphore = VK_NULL_HANDLE;
 		std::atomic<uint64_t> m_TimelineValue{ 0 };
 
-		uint32_t m_NextWindowSlot = 0;
+		// Claimed from AllocateWindowSlot until RecycleWindowSlot.
+		std::array<bool, MaxWindowSlots> m_WindowSlotClaimed{};
 		std::array<VulkanContext*, MaxWindowSlots> m_WindowContexts{};
 
 		bool m_ValidationEnabled = false;

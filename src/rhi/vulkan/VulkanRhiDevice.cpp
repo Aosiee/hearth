@@ -133,7 +133,15 @@ namespace rhi {
 			case TextureState::Undefined:    return VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
 			case TextureState::RenderTarget: return VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
 			case TextureState::DepthWrite:   return VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
-			case TextureState::DepthRead:    return VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+			// DepthRead is the shared shadow atlases' rest state, SAMPLED
+			// by the lighting fragment shaders in DEPTH_READ_ONLY_OPTIMAL
+			// (the layout their bindless descriptors are written in) - the
+			// fragment-shader stage + sampled read join the depth-test
+			// read, so a cast -> read barrier makes the cast's writes
+			// visible to the samples and a read -> cast barrier orders
+			// those samples before the next cast (the WAR edge).
+			case TextureState::DepthRead:    return VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT
+				| VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
 			case TextureState::ShaderRead:   return VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
 			case TextureState::DepthShaderRead: return VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
 			case TextureState::TransferSrc:  return VK_PIPELINE_STAGE_2_TRANSFER_BIT;
@@ -150,7 +158,7 @@ namespace rhi {
 			case TextureState::Undefined:    return VK_ACCESS_2_NONE;
 			case TextureState::RenderTarget: return VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
 			case TextureState::DepthWrite:   return VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-			case TextureState::DepthRead:    return VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+			case TextureState::DepthRead:    return VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
 			case TextureState::ShaderRead:   return VK_ACCESS_2_SHADER_READ_BIT;
 			case TextureState::DepthShaderRead: return VK_ACCESS_2_SHADER_READ_BIT;
 			case TextureState::TransferSrc:  return VK_ACCESS_2_TRANSFER_READ_BIT;
@@ -971,6 +979,8 @@ namespace rhi {
 		for (VkDescriptorSet& set : m_GlobalSets)
 			set = VK_NULL_HANDLE;
 		m_DescriptorWriteLog.clear();
+		m_CurrentTextureDescriptors.clear();
+		m_CurrentBufferDescriptors.clear();
 		m_PendingIndexReuse.clear();
 	}
 
@@ -1019,6 +1029,7 @@ namespace rhi {
 		std::lock_guard lock(m_DescriptorLogMutex);
 		entry.Seq = m_NextDescriptorSeq++;
 		m_DescriptorWriteLog.push_back(entry);
+		RecordCurrentDescriptor(entry);
 	}
 
 	uint32_t VulkanRhiDevice::AllocateBindlessBufferIndex()
@@ -1061,6 +1072,15 @@ namespace rhi {
 		std::lock_guard lock(m_DescriptorLogMutex);
 		entry.Seq = m_NextDescriptorSeq++;
 		m_DescriptorWriteLog.push_back(entry);
+		RecordCurrentDescriptor(entry);
+	}
+
+	void VulkanRhiDevice::RecordCurrentDescriptor(const DescriptorWriteLogEntry& entry)
+	{
+		std::vector<DescriptorWriteLogEntry>& table = entry.Binding == 1 ? m_CurrentBufferDescriptors : m_CurrentTextureDescriptors;
+		if (entry.Index >= table.size())
+			table.resize((size_t)entry.Index + 1);
+		table[entry.Index] = entry;
 	}
 
 	void VulkanRhiDevice::ApplyDescriptorLog(uint32_t slot)
@@ -1070,6 +1090,12 @@ namespace rhi {
 		std::lock_guard lock(m_DescriptorLogMutex);
 
 		const uint64_t lastApplied = m_LastAppliedSeq[slot];
+		// A slot's first apply (at birth, or after NoteSlotExpected)
+		// re-seeds the WHOLE set from the current-descriptor tables - the
+		// log's GC has already dropped every entry the other slots applied,
+		// so the tail alone left a mid-session window with most of its set
+		// unwritten.
+		const bool reseed = !m_SlotSeeded[slot];
 
 		// Collect the entries this slot hasn't applied yet (they are
 		// already in log order, seq ascending - the apply lower_bounds
@@ -1084,15 +1110,31 @@ namespace rhi {
 		bufferInfos.clear();
 		const auto pendingBegin = std::lower_bound(m_DescriptorWriteLog.begin(), m_DescriptorWriteLog.end(), lastApplied,
 			[](const DescriptorWriteLogEntry& entry, uint64_t seq) { return entry.Seq <= seq; });
-		const size_t pendingCount = (size_t)(m_DescriptorWriteLog.end() - pendingBegin);
+		std::vector<const DescriptorWriteLogEntry*>& pending = m_ApplyScratchEntries;
+		pending.clear();
+		if (reseed)
+		{
+			for (const DescriptorWriteLogEntry& entry : m_CurrentTextureDescriptors)
+				if (entry.Seq != 0)
+					pending.push_back(&entry);
+			for (const DescriptorWriteLogEntry& entry : m_CurrentBufferDescriptors)
+				if (entry.Seq != 0)
+					pending.push_back(&entry);
+		}
+		else
+		{
+			for (auto it = pendingBegin; it != m_DescriptorWriteLog.end(); ++it)
+				pending.push_back(&*it);
+		}
+		const size_t pendingCount = pending.size();
 		writes.reserve(pendingCount);
 		imageInfos.reserve(pendingCount);
 		bufferInfos.reserve(pendingCount);
 
 		uint64_t maxSeq = lastApplied;
-		for (auto it = pendingBegin; it != m_DescriptorWriteLog.end(); ++it)
+		for (const DescriptorWriteLogEntry* pendingEntry : pending)
 		{
-			const DescriptorWriteLogEntry& entry = *it;
+			const DescriptorWriteLogEntry& entry = *pendingEntry;
 
 			VkWriteDescriptorSet write{};
 			write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1129,18 +1171,19 @@ namespace rhi {
 			write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 			write.pImageInfo = &imageInfos.back();
 			writes.push_back(write);
-			maxSeq = entry.Seq;
+			maxSeq = std::max(maxSeq, entry.Seq);
+		}
+		// The re-seed covers every append so far (the tables hold the
+		// latest entry of each index the log ever named).
+		if (reseed)
+		{
+			maxSeq = std::max(maxSeq, m_NextDescriptorSeq - 1);
+			m_SlotSeeded[slot] = true;
 		}
 
 		if (!writes.empty())
-		{
 			vkUpdateDescriptorSets(m_Vulkan.GetDevice(), (uint32_t)writes.size(), writes.data(), 0, nullptr);
-			m_LastAppliedSeq[slot] = maxSeq;
-		}
-		else
-		{
-			m_LastAppliedSeq[slot] = lastApplied; // nothing pending; keep the floor
-		}
+		m_LastAppliedSeq[slot] = maxSeq; // lastApplied when nothing was pending
 
 		// GC: an entry every slot has applied is dead weight (the log would
 		// otherwise grow forever across a long session's loads/unloads).
@@ -1163,9 +1206,10 @@ namespace rhi {
 	{
 		// The min over the EXPECTED slots. An expected slot that hasn't
 		// applied yet reads as the seq 0 - the floor stays 0 until it
-		// applies (its first apply is the FULL log rewrite, so the
-		// entries must survive until then). The never-expected slots (the
-		// never-opened windows) stay out.
+		// applies, so no index pending reuse can recycle before its
+		// tombstone reaches that slot (the first apply is the whole-set
+		// re-seed, which covers every append so far). The never-expected
+		// slots (the never-opened windows) stay out.
 		uint64_t min = UINT64_MAX;
 		for (uint32_t i = 0; i < VulkanDevice::TotalFrameSlots; i++)
 		{
@@ -1183,7 +1227,14 @@ namespace rhi {
 		{
 			const uint32_t slot = base + i;
 			if (slot < VulkanDevice::TotalFrameSlots)
+			{
 				m_SlotExpected[slot] = true;
+				// The slot's next apply re-seeds its whole set, and until then
+				// it pins the GC floor at 0 (a recycled slot's old seq must
+				// not count).
+				m_SlotSeeded[slot] = false;
+				m_LastAppliedSeq[slot] = 0;
+			}
 		}
 	}
 
@@ -1263,6 +1314,7 @@ namespace rhi {
 			std::lock_guard lock(m_DescriptorLogMutex);
 			tombstone.Seq = m_NextDescriptorSeq++;
 			m_DescriptorWriteLog.push_back(tombstone);
+			RecordCurrentDescriptor(tombstone);
 			entry.TombstoneSeq = tombstone.Seq;
 		}
 
@@ -1291,6 +1343,7 @@ namespace rhi {
 			std::lock_guard lock(m_DescriptorLogMutex);
 			tombstone.Seq = m_NextDescriptorSeq++;
 			m_DescriptorWriteLog.push_back(tombstone);
+			RecordCurrentDescriptor(tombstone);
 			entry.TombstoneSeq = tombstone.Seq;
 		}
 
@@ -1351,7 +1404,7 @@ namespace rhi {
 					entry.Slot = context->GetCurrentFrameSlot();
 			}
 		}
-		entry.ResetTag = m_SlotResetCount[entry.Slot].load(std::memory_order_relaxed) + 2;
+		entry.ResetTag = m_SlotResetCount[entry.Slot].load(std::memory_order_relaxed) + kRetireResetDistance;
 		m_RetireQueue.push_back(std::move(entry));
 	}
 
@@ -1418,6 +1471,25 @@ namespace rhi {
 					it = m_DescriptorWriteLog.erase(it);
 				else
 					++it;
+			}
+			// The re-seed table must never name the freed view/buffer either
+			// - a write that followed the tombstone (dropped from the log
+			// above) falls back to the null descriptor the tombstone wrote.
+			std::vector<DescriptorWriteLogEntry>& table = binding == 1 ? m_CurrentBufferDescriptors : m_CurrentTextureDescriptors;
+			if (entry.TombstoneSeq != 0 && entry.BindlessIndex < table.size() && table[entry.BindlessIndex].Seq > entry.TombstoneSeq)
+			{
+				DescriptorWriteLogEntry& current = table[entry.BindlessIndex];
+				if (binding == 1)
+				{
+					current.Buffer = m_NullBuffer;
+				}
+				else
+				{
+					current.Kind_ = DescriptorWriteLogEntry::Kind::Tombstone;
+					current.ImageView = m_NullTextureView;
+					current.Sampler = m_NullTextureSampler;
+					current.ImageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				}
 			}
 
 			const bool recycled = entry.TombstoneSeq == 0 || entry.TombstoneSeq <= MinLastAppliedSeq();

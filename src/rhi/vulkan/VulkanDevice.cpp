@@ -749,11 +749,13 @@ namespace TinyEngine {
 
 	uint32_t VulkanDevice::AllocateWindowSlot(VulkanContext* owner)
 	{
-		TE_CORE_ASSERT(m_NextWindowSlot < MaxWindowSlots, "More windows than VulkanDevice::MaxWindowSlots allows!");
-		uint32_t base = m_NextWindowSlot * FramesInFlight;
-		m_WindowContexts[m_NextWindowSlot] = owner;
-		m_NextWindowSlot++;
-		return base;
+		uint32_t slot = 0;
+		while (slot < MaxWindowSlots && m_WindowSlotClaimed[slot])
+			slot++;
+		TE_CORE_ASSERT(slot < MaxWindowSlots, "More live windows than VulkanDevice::MaxWindowSlots allows!");
+		m_WindowSlotClaimed[slot] = true;
+		m_WindowContexts[slot] = owner;
+		return slot * FramesInFlight;
 	}
 
 	void VulkanDevice::ReleaseWindowSlot(uint32_t slotBase)
@@ -761,6 +763,14 @@ namespace TinyEngine {
 		const uint32_t slot = slotBase / FramesInFlight;
 		TE_CORE_ASSERT(slot < MaxWindowSlots, "ReleaseWindowSlot with an out-of-range slot base");
 		m_WindowContexts[slot] = nullptr;
+	}
+
+	void VulkanDevice::RecycleWindowSlot(uint32_t slotBase)
+	{
+		const uint32_t slot = slotBase / FramesInFlight;
+		TE_CORE_ASSERT(slot < MaxWindowSlots, "RecycleWindowSlot with an out-of-range slot base");
+		TE_CORE_ASSERT(m_WindowContexts[slot] == nullptr, "RecycleWindowSlot before ReleaseWindowSlot");
+		m_WindowSlotClaimed[slot] = false;
 	}
 
 	VkCommandBuffer VulkanDevice::BeginSingleTimeCommands() const
