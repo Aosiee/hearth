@@ -24,6 +24,11 @@ namespace rhi {
 		TransferSrc,
 		TransferDst,
 		Present,
+		// A swapchain image just acquired - its contents are undefined, and
+		// its first barrier must chain with the acquire semaphore's wait
+		// stage, so the source scope is that stage (the colour-attachment
+		// output), not TOP_OF_PIPE. The swapchain's graph import state.
+		SwapchainAcquired,
 	};
 
 	enum class BufferState : uint8_t
@@ -91,6 +96,7 @@ namespace rhi {
 		case TextureState::TransferSrc:  return "TransferSrc";
 		case TextureState::TransferDst:  return "TransferDst";
 		case TextureState::Present:      return "Present";
+		case TextureState::SwapchainAcquired: return "SwapchainAcquired";
 		}
 		return "Unknown";
 	}

@@ -116,6 +116,7 @@ namespace rhi {
 			case TextureState::TransferSrc:  return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 			case TextureState::TransferDst:  return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 			case TextureState::Present:      return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+			case TextureState::SwapchainAcquired: return VK_IMAGE_LAYOUT_UNDEFINED;
 			}
 			return VK_IMAGE_LAYOUT_UNDEFINED;
 		}
@@ -147,6 +148,13 @@ namespace rhi {
 			case TextureState::TransferSrc:  return VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 			case TextureState::TransferDst:  return VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 			case TextureState::Present:      return VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
+			// The acquire semaphore's wait stage
+			// (VulkanSwapchain::SubmitAndPresent's pWaitDstStageMask) -
+			// the first barrier's source scope must include it so the
+			// layout transition chains after the wait (TOP_OF_PIPE did
+			// not: the syncval WAR against vkAcquireNextImageKHR).
+			// Change the two together.
+			case TextureState::SwapchainAcquired: return VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
 			}
 			return VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
 		}
@@ -164,6 +172,7 @@ namespace rhi {
 			case TextureState::TransferSrc:  return VK_ACCESS_2_TRANSFER_READ_BIT;
 			case TextureState::TransferDst:  return VK_ACCESS_2_TRANSFER_WRITE_BIT;
 			case TextureState::Present:      return VK_ACCESS_2_NONE;
+			case TextureState::SwapchainAcquired: return VK_ACCESS_2_NONE;
 			}
 			return VK_ACCESS_2_NONE;
 		}

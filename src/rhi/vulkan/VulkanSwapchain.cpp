@@ -632,6 +632,9 @@ namespace TinyEngine {
 		TE_PROFILE_FUNCTION();
 
 		VkSemaphore waitSemaphores[] = { m_ImageAvailableSemaphores[frameIndex] };
+		// The graph's first swapchain barrier chains with this wait through
+		// TextureState::SwapchainAcquired's source stage (the RHI table) -
+		// change the two together.
 		VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
 		VkSemaphore signalSemaphores[] = { m_RenderFinishedSemaphores[imageIndex] };
 
