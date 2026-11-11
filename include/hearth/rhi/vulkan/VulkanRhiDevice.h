@@ -222,6 +222,10 @@ namespace rhi {
 		// VulkanIndexBuffer) as a non-owning handle so draws can go through
 		// BufferHandles; DestroyBuffer on it releases the slot only.
 		BufferHandle AdoptExternalBuffer(VkBuffer buffer, VmaAllocation allocation);
+		// An adopted handle's slot, released through the retire queue (an
+		// in-flight frame's record may still resolve the handle) - the borrow
+		// table's re-borrow path. Game thread, like every QueueRetire.
+		void RetireExternalBuffer(BufferHandle handle);
 		void SetBufferData(BufferHandle handle, const void* data, uint64_t size, uint64_t offset = 0) override;
 		// The capture sidecar's read of a host-visible buffer (null otherwise).
 		const void* GetBufferMappedData(BufferHandle handle);
@@ -332,7 +336,7 @@ namespace rhi {
 
 		struct RetireEntry
 		{
-			enum class Kind : uint8_t { Texture, Buffer, Pipeline, Shader, Sampler };
+			enum class Kind : uint8_t { Texture, Buffer, Pipeline, Shader, Sampler, ExternalBufferSlot };
 
 			Kind        Kind_ = Kind::Texture;
 			// The frame-boundary tag - the entry frees once the SLOT's
@@ -350,6 +354,9 @@ namespace rhi {
 			VkPipeline  Pipeline = VK_NULL_HANDLE;
 			VkPipelineLayout Layout = VK_NULL_HANDLE;
 			VkShaderModule ShaderModule = VK_NULL_HANDLE;
+			// ExternalBufferSlot: the adopted handle whose table slot frees
+			// (the VkBuffer is the engine mesh's - never destroyed here).
+			BufferHandle ExternalBuffer;
 			uint32_t    BindlessIndex = 0;
 			bool        HasBindlessIndex = false;
 			// P-F: the tombstone log write's seq (0 = none). The index is

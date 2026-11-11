@@ -7,6 +7,9 @@
 #include <array>
 #include <atomic>
 #include <mutex>
+#include <thread>
+#include <utility>
+#include <vector>
 
 struct GLFWwindow;
 
@@ -62,6 +65,27 @@ namespace TinyEngine {
 		// The live window contexts, indexed by window slot (null = never
 		// allocated or released). Game-thread-only, like the allocation.
 		const std::array<VulkanContext*, MaxWindowSlots>& GetLiveWindowContexts() const { return m_WindowContexts; }
+
+		// The main window's context: the slot-0 window's. Owned here,
+		// beside the window-slot table (formerly the file-scope
+		// s_MainVulkanContext). Set exactly once, by the slot-0 context's
+		// Init (a secondary window never sets it); cleared by that context's
+		// destructor. The clear is deliberately LATER than
+		// ReleaseWindowSlot's table entry: the main context's own teardown
+		// joins its submit thread, whose last record still reads the main
+		// context. Written on the game thread between frames; read on the
+		// game thread and inside record jobs (the same access as before).
+		void SetMainContext(VulkanContext* context);
+		void ClearMainContext(VulkanContext* context);
+		VulkanContext* TryGetMainContext() const { return m_MainContext; }
+		// Asserts the main context exists (a null main context in a
+		// windowed flavor is a bug, not a case).
+		VulkanContext& GetMainContext() const;
+
+		// The game thread: the thread that created the device (the first
+		// window's VulkanContext::Init). The transient pool and the upload
+		// batch below are game-thread-only.
+		bool IsGameThread() const { return std::this_thread::get_id() == m_GameThreadId; }
 
 		// windowForExtensionQuery is only used to ask GLFW which instance extensions
 		// this windowing system needs (X11/Wayland/Win32 surface support etc). No
@@ -171,7 +195,10 @@ namespace TinyEngine {
 
 
 		// Used for one-off resource setup work that doesn't happen inside the
-		// normal per-frame recording, buffer/texture uploads mainly. Allocates
+		// normal per-frame recording, buffer/texture uploads mainly. Game
+		// thread only (asserted - the transient pool and the upload batch
+		// are not synchronized; the submit thread's swapchain transition
+		// uses the swapchain's own pool). Allocates
 		// from a dedicated transient pool (separate from the per-frame-in-flight
 		// pools, which get reset wholesale every frame and would be the wrong
 		// place for something that might outlive a single frame's turnaround),
@@ -180,24 +207,24 @@ namespace TinyEngine {
 		// simplification: resource uploads happen rarely enough (texture/mesh
 		// load, not every frame) that stalling for them is fine for now, an async
 		// transfer queue can replace this later if upload volume ever justifies it.
-		VkCommandBuffer BeginSingleTimeCommands() const;
+		VkCommandBuffer BeginSingleTimeCommands();
 		void EndSingleTimeCommands(VkCommandBuffer commandBuffer);
 
-		// The upload batch. While a batch is active on the CALLING
-		// thread, BeginSingleTimeCommands returns the batch's command
-		// buffer and EndSingleTimeCommands is a no-op - every upload
-		// records into one buffer.
+		// The upload batch. While a batch is active,
+		// BeginSingleTimeCommands returns the batch's command buffer and
+		// EndSingleTimeCommands is a no-op - every upload records into one
+		// buffer.
 		// EndUploadBatch ends + submits it once on the graphics queue
 		// WITHOUT a device waitIdle (the queue's submission order + the
 		// frame's acquire timeline wait order it before the frame that
-		// samples the uploads). The batch state is thread-local, so the
-		// game-thread promotion never shares it with the submit thread's
-		// own single-time-commands use (the swapchain creation path).
+		// samples the uploads). Game thread only, like the single-time
+		// commands (the batch is the m_UploadBatch member, formerly a
+		// thread_local; every entry point asserts the game thread).
 		// A batch with no recorded commands submits nothing.
 		void BeginUploadBatch();
 		void EndUploadBatch();
 
-		// While a batch is active on the calling thread, upload helpers
+		// While a batch is active, upload helpers
 		// hand their transient staging buffers here instead of destroying
 		// them: the batch's recorded copies still reference them, and they
 		// die only once the GPU has passed the batch's submission (the
@@ -240,6 +267,24 @@ namespace TinyEngine {
 		// Claimed from AllocateWindowSlot until RecycleWindowSlot.
 		std::array<bool, MaxWindowSlots> m_WindowSlotClaimed{};
 		std::array<VulkanContext*, MaxWindowSlots> m_WindowContexts{};
+		VulkanContext* m_MainContext = nullptr;
+
+		std::thread::id m_GameThreadId;
+		void AssertGameThread(const char* entryPoint) const;
+
+		// The open upload batch. While Buffer is held, every
+		// Begin/EndSingleTimeCommands pair records into it instead of
+		// allocating its own. Submitted buffers + their retired staging
+		// are reclaimed once the timeline passes the batch's signal.
+		struct UploadBatch
+		{
+			VkCommandBuffer Buffer = VK_NULL_HANDLE;
+			bool Dirty = false;
+			std::vector<VkCommandBuffer> SubmittedBuffers;
+			uint64_t SubmittedValue = 0;
+			std::vector<std::pair<VkBuffer, VmaAllocation>> PendingStaging;
+		};
+		UploadBatch m_UploadBatch;
 
 		bool m_ValidationEnabled = false;
 		bool m_SamplerAnisotropySupported = false;

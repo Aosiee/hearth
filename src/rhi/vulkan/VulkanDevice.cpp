@@ -16,21 +16,6 @@ namespace TinyEngine {
 
 	namespace {
 
-		// The calling thread's active upload batch (the game-thread
-		// promotion opens one per frame; the submit thread's
-		// single-time-commands use never shares it - thread-local state,
-		// no cross-thread race). While a buffer is held, every
-		// Begin/EndSingleTimeCommands pair records into it instead of
-		// allocating its own. Submitted buffers + their retired staging
-		// are reclaimed once the timeline passes the batch's signal.
-		thread_local struct
-		{
-			VkCommandBuffer Buffer = VK_NULL_HANDLE;
-			bool Dirty = false;
-			std::vector<VkCommandBuffer> SubmittedBuffers;
-			uint64_t SubmittedValue = 0;
-			std::vector<std::pair<VkBuffer, VmaAllocation>> PendingStaging;
-		} s_UploadBatch;
 
 		// The only validation layer used. If it isn't present on this machine
 		// (no Vulkan SDK / LunarG layers installed), startup carries on
@@ -116,6 +101,10 @@ namespace TinyEngine {
 		// - the surface-dependent selections below skip the present
 		// requirement and the swapchain extension.
 		m_SurfaceEnabled = windowForExtensionQuery != nullptr;
+		// The creating thread is the game thread (the first window's
+		// VulkanContext::Init); the single-time commands and the upload
+		// batch assert it from here on.
+		m_GameThreadId = std::this_thread::get_id();
 
 		VK_CHECK(volkInitialize());
 
@@ -205,13 +194,13 @@ namespace TinyEngine {
 
 		// The device is idle - reclaim any uploaded-batch buffers +
 		// retired staging before their pool/allocator die.
-		for (auto& [buffer, allocation] : s_UploadBatch.PendingStaging)
+		for (auto& [buffer, allocation] : m_UploadBatch.PendingStaging)
 			vmaDestroyBuffer(m_Allocator, buffer, allocation);
-		s_UploadBatch.PendingStaging.clear();
-		for (VkCommandBuffer buffer : s_UploadBatch.SubmittedBuffers)
+		m_UploadBatch.PendingStaging.clear();
+		for (VkCommandBuffer buffer : m_UploadBatch.SubmittedBuffers)
 			vkFreeCommandBuffers(m_Device, m_TransientCommandPool, 1, &buffer);
-		s_UploadBatch.SubmittedBuffers.clear();
-		s_UploadBatch.SubmittedValue = 0;
+		m_UploadBatch.SubmittedBuffers.clear();
+		m_UploadBatch.SubmittedValue = 0;
 
 		for (VkQueryPool pool : m_TimestampPools)
 		{
@@ -773,14 +762,42 @@ namespace TinyEngine {
 		m_WindowSlotClaimed[slot] = false;
 	}
 
-	VkCommandBuffer VulkanDevice::BeginSingleTimeCommands() const
+	void VulkanDevice::SetMainContext(VulkanContext* context)
 	{
+		// M-B: set-once - a second set (e.g. a secondary window claiming the
+		// main context) is a defect, not a silent overwrite.
+		TE_CORE_ASSERT(m_MainContext == nullptr, "SetMainContext called twice - the main context is set exactly once (slot 0)");
+		TE_CORE_ASSERT(context != nullptr && m_WindowContexts[0] == context, "SetMainContext from a context that does not own window slot 0");
+		m_MainContext = context;
+	}
+
+	void VulkanDevice::ClearMainContext(VulkanContext* context)
+	{
+		TE_CORE_ASSERT(m_MainContext == context, "ClearMainContext from a context that is not the main context");
+		m_MainContext = nullptr;
+	}
+
+	VulkanContext& VulkanDevice::GetMainContext() const
+	{
+		TE_CORE_ASSERT(m_MainContext != nullptr, "GetMainContext() with no main context - the slot-0 window's context must exist in windowed flavors");
+		return *m_MainContext;
+	}
+
+	void VulkanDevice::AssertGameThread(const char* entryPoint) const
+	{
+		(void)entryPoint;
+		TE_CORE_ASSERT(IsGameThread(), std::string("VulkanDevice::") + entryPoint + " off the game thread - the transient pool and the upload batch are game-thread-only");
+	}
+
+	VkCommandBuffer VulkanDevice::BeginSingleTimeCommands()
+	{
+		AssertGameThread("BeginSingleTimeCommands");
 		// Inside an active upload batch every upload records into the
 		// batch's one buffer (the batch owns begin/end/submit).
-		if (s_UploadBatch.Buffer != VK_NULL_HANDLE)
+		if (m_UploadBatch.Buffer != VK_NULL_HANDLE)
 		{
-			s_UploadBatch.Dirty = true;
-			return s_UploadBatch.Buffer;
+			m_UploadBatch.Dirty = true;
+			return m_UploadBatch.Buffer;
 		}
 
 		VkCommandBufferAllocateInfo allocInfo{};
@@ -802,10 +819,11 @@ namespace TinyEngine {
 
 	void VulkanDevice::EndSingleTimeCommands(VkCommandBuffer commandBuffer)
 	{
+		AssertGameThread("EndSingleTimeCommands");
 		// The batch owns the end + submit for its own buffer.
-		if (s_UploadBatch.Buffer != VK_NULL_HANDLE)
+		if (m_UploadBatch.Buffer != VK_NULL_HANDLE)
 		{
-			TE_CORE_ASSERT(commandBuffer == s_UploadBatch.Buffer, "an upload outside the batch ended inside it");
+			TE_CORE_ASSERT(commandBuffer == m_UploadBatch.Buffer, "an upload outside the batch ended inside it");
 			return;
 		}
 
@@ -847,20 +865,21 @@ namespace TinyEngine {
 
 	void VulkanDevice::BeginUploadBatch()
 	{
-		TE_CORE_ASSERT(s_UploadBatch.Buffer == VK_NULL_HANDLE, "an upload batch is already active on this thread");
+		AssertGameThread("BeginUploadBatch");
+		TE_CORE_ASSERT(m_UploadBatch.Buffer == VK_NULL_HANDLE, "an upload batch is already active");
 
 		// Reclaim the previous batch's submitted buffers + retired staging
 		// once the GPU has passed its submission (conservative: everything
 		// is freed at the LATEST submitted value).
-		if (s_UploadBatch.SubmittedValue != 0 && GetCompletedTimelineValue() >= s_UploadBatch.SubmittedValue)
+		if (m_UploadBatch.SubmittedValue != 0 && GetCompletedTimelineValue() >= m_UploadBatch.SubmittedValue)
 		{
-			for (auto& [buffer, allocation] : s_UploadBatch.PendingStaging)
+			for (auto& [buffer, allocation] : m_UploadBatch.PendingStaging)
 				vmaDestroyBuffer(m_Allocator, buffer, allocation);
-			s_UploadBatch.PendingStaging.clear();
-			for (VkCommandBuffer buffer : s_UploadBatch.SubmittedBuffers)
+			m_UploadBatch.PendingStaging.clear();
+			for (VkCommandBuffer buffer : m_UploadBatch.SubmittedBuffers)
 				vkFreeCommandBuffers(m_Device, m_TransientCommandPool, 1, &buffer);
-			s_UploadBatch.SubmittedBuffers.clear();
-			s_UploadBatch.SubmittedValue = 0;
+			m_UploadBatch.SubmittedBuffers.clear();
+			m_UploadBatch.SubmittedValue = 0;
 		}
 
 		VkCommandBufferAllocateInfo allocInfo{};
@@ -869,26 +888,27 @@ namespace TinyEngine {
 		allocInfo.commandPool = m_TransientCommandPool;
 		allocInfo.commandBufferCount = 1;
 
-		VK_CHECK(vkAllocateCommandBuffers(m_Device, &allocInfo, &s_UploadBatch.Buffer));
+		VK_CHECK(vkAllocateCommandBuffers(m_Device, &allocInfo, &m_UploadBatch.Buffer));
 
 		VkCommandBufferBeginInfo beginInfo{};
 		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-		VK_CHECK(vkBeginCommandBuffer(s_UploadBatch.Buffer, &beginInfo));
-		s_UploadBatch.Dirty = false;
+		VK_CHECK(vkBeginCommandBuffer(m_UploadBatch.Buffer, &beginInfo));
+		m_UploadBatch.Dirty = false;
 	}
 
 	void VulkanDevice::EndUploadBatch()
 	{
-		VkCommandBuffer commandBuffer = s_UploadBatch.Buffer;
+		AssertGameThread("EndUploadBatch");
+		VkCommandBuffer commandBuffer = m_UploadBatch.Buffer;
 		if (commandBuffer == VK_NULL_HANDLE)
-			return; // no batch active on this thread
+			return; // no batch active
 
 		// A batch with nothing recorded submits nothing (a recording-state
 		// free is legal).
-		if (!s_UploadBatch.Dirty)
+		if (!m_UploadBatch.Dirty)
 		{
-			s_UploadBatch.Buffer = VK_NULL_HANDLE;
+			m_UploadBatch.Buffer = VK_NULL_HANDLE;
 			vkFreeCommandBuffers(m_Device, m_TransientCommandPool, 1, &commandBuffer);
 			return;
 		}
@@ -929,17 +949,18 @@ namespace TinyEngine {
 			VK_CHECK(vkQueueSubmit(m_GraphicsQueue, 1, &submitInfo, VK_NULL_HANDLE));
 		}
 
-		s_UploadBatch.SubmittedBuffers.push_back(commandBuffer);
-		s_UploadBatch.SubmittedValue = signalValue;
-		s_UploadBatch.Buffer = VK_NULL_HANDLE;
-		s_UploadBatch.Dirty = false;
+		m_UploadBatch.SubmittedBuffers.push_back(commandBuffer);
+		m_UploadBatch.SubmittedValue = signalValue;
+		m_UploadBatch.Buffer = VK_NULL_HANDLE;
+		m_UploadBatch.Dirty = false;
 	}
 
 	bool VulkanDevice::BatchRetireStaging(VkBuffer buffer, VmaAllocation allocation)
 	{
-		if (s_UploadBatch.Buffer == VK_NULL_HANDLE)
+		AssertGameThread("BatchRetireStaging");
+		if (m_UploadBatch.Buffer == VK_NULL_HANDLE)
 			return false;
-		s_UploadBatch.PendingStaging.emplace_back(buffer, allocation);
+		m_UploadBatch.PendingStaging.emplace_back(buffer, allocation);
 		return true;
 	}
 

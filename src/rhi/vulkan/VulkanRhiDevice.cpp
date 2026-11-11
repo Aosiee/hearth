@@ -2,7 +2,7 @@
 #include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
 #include "Platform/Vulkan/RHI/PipelineCacheFile.h"
 #include "Platform/Vulkan/VulkanFrameContext.h" // GetRecordFrameIndex (the P-F slot pick)
-#include "Platform/Vulkan/VulkanContext.h" // GetMainVulkanContext->GetCurrentFrameSlot (the retire queue's slot tag)
+#include "Platform/Vulkan/VulkanContext.h" // the main context's GetCurrentFrameSlot (the retire queue's slot tag)
 
 #include "TinyEngine/Core/Log.h"
 #include "TinyEngine/Core/Application.h"
@@ -1407,7 +1407,7 @@ namespace rhi {
 		if (entry.Slot == kNoFrameSlot)
 		{
 			entry.Slot = 0;
-			if (VulkanContext* context = TryGetMainVulkanContext())
+			if (VulkanContext* context = m_Vulkan.TryGetMainContext())
 			{
 				if (context->IsGameThread())
 					entry.Slot = context->GetCurrentFrameSlot();
@@ -1425,6 +1425,23 @@ namespace rhi {
 
 	void VulkanRhiDevice::FreeRetireEntry(const RetireEntry& entry)
 	{
+		// An adopted buffer's slot carries no Vk object and no descriptor:
+		// only the handle table entry frees (its own lock), the same release
+		// DestroyBuffer gives an external handle - outside the descriptor
+		// log lock, which it never needs.
+		if (entry.Kind_ == RetireEntry::Kind::ExternalBufferSlot)
+		{
+			if (VulkanBuffer* buffer = m_Buffers.Get(entry.ExternalBuffer))
+			{
+				TE_CORE_ASSERT(buffer->IsExternal(), "an external-slot retire entry names an owned buffer");
+				buffer->Shutdown();
+			}
+			const bool released = m_Buffers.Release(entry.ExternalBuffer);
+			TE_CORE_ASSERT(released, "retiring an invalid/stale adopted RHI buffer");
+			(void)released;
+			return;
+		}
+
 		// P-F: the destruction of a texture's Vk view and the purge of its
 		// REAL log entries must be atomic w.r.t. ApplyDescriptorLog - a
 		// record worker mid-apply holds this mutex, so destroying the view
@@ -1462,6 +1479,8 @@ namespace rhi {
 			if (entry.Sampler != VK_NULL_HANDLE)
 				vkDestroySampler(m_Vulkan.GetDevice(), entry.Sampler, nullptr);
 			break;
+		case RetireEntry::Kind::ExternalBufferSlot:
+			break; // handled above, outside the lock
 		}
 		if (entry.HasBindlessIndex)
 		{
@@ -1614,6 +1633,15 @@ namespace rhi {
 		adopted->Adopt(buffer, allocation);
 		m_Buffers.Publish(handle, std::unique_ptr<VulkanBuffer>(adopted));
 		return handle;
+	}
+
+	void VulkanRhiDevice::RetireExternalBuffer(BufferHandle handle)
+	{
+		TE_CORE_ASSERT(m_Buffers.Get(handle) && m_Buffers.Get(handle)->IsExternal(), "RetireExternalBuffer on an invalid or owned buffer handle");
+		RetireEntry entry;
+		entry.Kind_ = RetireEntry::Kind::ExternalBufferSlot;
+		entry.ExternalBuffer = handle;
+		QueueRetire(std::move(entry));
 	}
 
 	void VulkanRhiDevice::WriteBindlessBuffer(uint32_t index, BufferHandle handle)
