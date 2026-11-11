@@ -43,12 +43,17 @@ namespace rhi {
 	};
 
 	// The command-list implementation: wraps one VkCommandBuffer and
-	// resolves every handle through the owning device.
+	// resolves every handle through the owning device. Constructed with the
+	// frame slot its buffer records for (CommandList::FrameSlot) - the
+	// record job's (frame slot, record thread) pool slot, or the slot an
+	// adopting caller received with the buffer. A renderer that wraps a
+	// buffer it was handed builds its wrapper from the list it got (same
+	// buffer, same slot), never from a slot looked up elsewhere.
 	class VulkanRhiDevice;
 	class VulkanCommandList final : public CommandList
 	{
 	public:
-		VulkanCommandList(VulkanRhiDevice* device, VkCommandBuffer commandBuffer);
+		VulkanCommandList(VulkanRhiDevice* device, VkCommandBuffer commandBuffer, uint32_t frameSlot);
 
 		void Begin() override;
 		void End() override;
@@ -256,7 +261,7 @@ namespace rhi {
 		CommandListHandle CreateCommandList(QueueHandle queue, uint32_t threadIndex) override;
 		void DestroyCommandList(CommandListHandle handle) override;
 		CommandList* GetCommandList(CommandListHandle handle) override;
-		CommandList* AdoptCommandBuffer(void* commandBuffer) override;
+		CommandList* AdoptCommandBuffer(void* commandBuffer, uint32_t frameSlot) override;
 
 		QueueHandle GetQueue(QueueKind kind) override;
 

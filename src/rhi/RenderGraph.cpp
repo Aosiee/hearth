@@ -387,30 +387,11 @@ namespace rg {
 	// that fans the passes onto workers must pre-create the transients via
 	// PreCreateTransients (the prepare stage) before the fan-out.
 	//
-	// M-A: the record context (the frame slot) is scoped around this pass
-	// through the host-wired hooks - the RAII scope restores the previous
-	// context on exit, so Loom's help-while-waiting (which can interleave
-	// another record job on the same worker) nests correctly.
-	void RenderGraph::RecordPass(uint32_t orderIndex, Device& device, CommandList& commandList, uint32_t frameSlot)
+	// The frame slot is the list's (CommandList::FrameSlot) - the old M-A
+	// enter/leave scope around this call (a thread-local) is gone.
+	void RenderGraph::RecordPass(uint32_t orderIndex, Device& device, CommandList& commandList)
 	{
 		Pass& pass = m_Passes[m_Order[orderIndex]];
-
-		struct RecordContextScope
-		{
-			RenderGraph* Graph;
-			uint32_t Previous;
-			explicit RecordContextScope(RenderGraph* graph, uint32_t slot)
-				: Graph(graph), Previous(0)
-			{
-				if (Graph->m_RecordContextEnter)
-					Previous = Graph->m_RecordContextEnter(slot);
-			}
-			~RecordContextScope()
-			{
-				if (Graph->m_RecordContextLeave)
-					Graph->m_RecordContextLeave(Previous);
-			}
-		} scope(this, frameSlot);
 
 		// The barrier descriptors point into the textureBarriers vector -
 		// the reserve prevents reallocation invalidating them mid-pass (the
@@ -454,12 +435,11 @@ namespace rg {
 		if (pass.ExecuteFn)
 		{
 			PassResources resources = ResolveResources(device, pass);
-			resources.FrameSlot = frameSlot;
 			pass.ExecuteFn(commandList, resources);
 		}
 	}
 
-	void RenderGraph::Execute(Device& device, CommandList& commandList, uint32_t frameSlot)
+	void RenderGraph::Execute(Device& device, CommandList& commandList)
 	{
 		// The per-texture state machine, walked identically to Compile so
 		// the emitted edges match GetCompiledBarriers() exactly - including
@@ -472,7 +452,7 @@ namespace rg {
 		PreCreateTransients(device);
 
 		for (uint32_t orderIndex = 0; orderIndex < m_Order.size(); orderIndex++)
-			RecordPass(orderIndex, device, commandList, frameSlot);
+			RecordPass(orderIndex, device, commandList);
 
 		// Record the transients' final states so the next frame's graph
 		// seeds its derivation from where this frame left them.

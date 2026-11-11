@@ -155,12 +155,15 @@ namespace TinyEngine {
 
 		// Wraps a stretch of recorded commands in a named, coloured label. Shows up
 		// as a group in RenderDoc/Nsight captures. Also where GPU timing for the
-		// in-editor GPU frame debugger comes from - every Begin/End call site
-		// gets per-pass GPU timestamps.
-		// timed = false records the label without a timestamp pair (the
-		// scope stack carries the no-slot sentinel, as on an overflow).
-		void CmdBeginDebugLabel(VkCommandBuffer commandBuffer, const std::string& name, const float colour[4] = nullptr, bool timed = true);
-		void CmdEndDebugLabel(VkCommandBuffer commandBuffer);
+		// in-editor GPU frame debugger comes from - every Begin/End call site gets
+		// per-pass GPU timestamps.
+		// timed = false records the label without a timestamp pair (the scope stack
+		// carries the no-slot sentinel, as on an overflow).
+		// `frameSlot` is the slot the buffer records for (its command list's
+		// FrameSlot()): it picks the timestamp pool and the (slot, record thread)
+		// scope stacks. Begin and End of one label pass the same slot.
+		void CmdBeginDebugLabel(VkCommandBuffer commandBuffer, uint32_t frameSlot, const std::string& name, const float colour[4] = nullptr, bool timed = true);
+		void CmdEndDebugLabel(VkCommandBuffer commandBuffer, uint32_t frameSlot);
 
 		// Call once per application frame, right after that frame-in-flight
 		// slot's fence has been waited on (VulkanSwapchain::AcquireNextImage)

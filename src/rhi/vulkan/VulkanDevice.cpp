@@ -1,6 +1,5 @@
 #include "tepch.h"
 #include "Platform/Vulkan/VulkanDevice.h"
-#include "Platform/Vulkan/VulkanFrameContext.h"
 #include "TinyEngine/Debug/GpuFrameDebugData.h"
 #include "TinyEngine/Debug/Profiler.h"
 #include "TinyEngine/Core/CrashHandler.h"
@@ -981,7 +980,7 @@ namespace TinyEngine {
 		(void)type; (void)handle; (void)name;
 	}
 
-	void VulkanDevice::CmdBeginDebugLabel(VkCommandBuffer commandBuffer, const std::string& name, const float colour[4], bool timed)
+	void VulkanDevice::CmdBeginDebugLabel(VkCommandBuffer commandBuffer, uint32_t frameSlot, const std::string& name, const float colour[4], bool timed)
 	{
 #if !defined(TE_CONF_DIST)
 		if (m_ValidationEnabled && vkCmdBeginDebugUtilsLabelEXT)
@@ -1004,8 +1003,7 @@ namespace TinyEngine {
 
 		if (m_TimestampsSupported)
 		{
-			uint32_t frameIndex = GetRecordFrameIndex();
-			TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "CmdBeginDebugLabel frame index out of range!");
+			TE_CORE_ASSERT(frameSlot < TotalFrameSlots, "CmdBeginDebugLabel frame index out of range!");
 
 			// T-F-B.3: the slot counter is per frame + atomic (the parallel
 			// record workers allocate concurrently); fetch_add keeps the used
@@ -1021,9 +1019,9 @@ namespace TinyEngine {
 			uint32_t slot = kNoTimestampSlot;
 			if (timed)
 			{
-				slot = m_NextQuerySlot[frameIndex].fetch_add(1, std::memory_order_relaxed);
+				slot = m_NextQuerySlot[frameSlot].fetch_add(1, std::memory_order_relaxed);
 				if (slot < kMaxTimestampsPerFrame)
-					vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, m_TimestampPools[frameIndex], slot);
+					vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, m_TimestampPools[frameSlot], slot);
 				else
 				{
 					NoteTimestampOverflow();
@@ -1033,23 +1031,22 @@ namespace TinyEngine {
 
 			// The begin/end pairing is always recorded by one worker, so the
 			// scope stacks are per (frame, record thread).
-			size_t threadKey = (size_t)frameIndex * m_RecordThreadCount + RecordThreadIndex();
+			size_t threadKey = (size_t)frameSlot * m_RecordThreadCount + RecordThreadIndex();
 			m_ScopeBeginStack[threadKey].push_back(slot);
 			m_ScopeNameStack[threadKey].push_back(name);
 		}
 #endif // !TE_CONF_DIST
-		(void)commandBuffer; (void)name; (void)colour; (void)timed;
+		(void)commandBuffer; (void)frameSlot; (void)name; (void)colour; (void)timed;
 	}
 
-	void VulkanDevice::CmdEndDebugLabel(VkCommandBuffer commandBuffer)
+	void VulkanDevice::CmdEndDebugLabel(VkCommandBuffer commandBuffer, uint32_t frameSlot)
 	{
 #if !defined(TE_CONF_DIST)
 		if (m_TimestampsSupported)
 		{
-			uint32_t frameIndex = GetRecordFrameIndex();
-			TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "CmdEndDebugLabel frame index out of range!");
+			TE_CORE_ASSERT(frameSlot < TotalFrameSlots, "CmdEndDebugLabel frame index out of range!");
 
-			size_t threadKey = (size_t)frameIndex * m_RecordThreadCount + RecordThreadIndex();
+			size_t threadKey = (size_t)frameSlot * m_RecordThreadCount + RecordThreadIndex();
 
 			// Begin/EndDebugLabel calls are always properly paired at every
 			// call site in this codebase, but guard anyway rather than pop an
@@ -1066,9 +1063,9 @@ namespace TinyEngine {
 				uint32_t endSlot = kNoTimestampSlot;
 				if (beginSlot != kNoTimestampSlot)
 				{
-					endSlot = m_NextQuerySlot[frameIndex].fetch_add(1, std::memory_order_relaxed);
+					endSlot = m_NextQuerySlot[frameSlot].fetch_add(1, std::memory_order_relaxed);
 					if (endSlot < kMaxTimestampsPerFrame)
-						vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, m_TimestampPools[frameIndex], endSlot);
+						vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, m_TimestampPools[frameSlot], endSlot);
 					else
 					{
 						NoteTimestampOverflow();
@@ -1091,7 +1088,7 @@ namespace TinyEngine {
 		if (m_ValidationEnabled && vkCmdEndDebugUtilsLabelEXT)
 			vkCmdEndDebugUtilsLabelEXT(commandBuffer);
 #endif // !TE_CONF_DIST
-		(void)commandBuffer;
+		(void)commandBuffer; (void)frameSlot;
 	}
 
 	void VulkanDevice::BeginProfilingFrame(uint32_t frameIndex, bool isMainWindow)

@@ -1,9 +1,12 @@
 #pragma once
 
-// The command-list surface. Recordable from any thread in contract; today
-// it records on the main thread only (recording threads come later). A
-// CommandList is bound to the thread whose pool it came from - recording
-// from another thread is a dev assert.
+// The command-list surface. Recordable from any thread. A CommandList is
+// bound to the thread whose pool it came from - recording from another
+// thread is a dev assert. A list also carries the FRAME SLOT of the pool
+// it came from (the pools are keyed by (frame slot, record thread)) - the
+// record-side slot every per-slot pick reads (the bindless set, the
+// timestamp pool, the per-slot draw queues), passed with the list instead
+// of read from a thread-local.
 
 #include "TinyEngine/RHI/Types.h"
 #include "TinyEngine/RHI/States.h"
@@ -42,6 +45,10 @@ namespace rhi {
 	{
 	public:
 		virtual ~CommandList() = default;
+
+		// The frame slot this list records for (the slot of its pool), set
+		// once at construction - a list cannot exist without one.
+		uint32_t FrameSlot() const { return m_FrameSlot; }
 
 		virtual void Begin() = 0;
 		virtual void End() = 0;
@@ -87,6 +94,12 @@ namespace rhi {
 		virtual void BeginLabel(const char* name, bool timed = true) = 0;
 		virtual void EndLabel() = 0;
 		virtual void WriteTimestamp(uint32_t queryIndex) = 0;
+
+	protected:
+		explicit CommandList(uint32_t frameSlot) : m_FrameSlot(frameSlot) {}
+
+	private:
+		uint32_t m_FrameSlot = 0;
 	};
 
 } // namespace rhi

@@ -73,7 +73,7 @@ namespace rg_tests {
 		rhi::CommandListHandle CreateCommandList(rhi::QueueHandle, uint32_t) override { return {}; }
 		void DestroyCommandList(rhi::CommandListHandle) override {}
 		rhi::CommandList* GetCommandList(rhi::CommandListHandle) override { return nullptr; }
-		rhi::CommandList* AdoptCommandBuffer(void*) override { return nullptr; }
+		rhi::CommandList* AdoptCommandBuffer(void*, uint32_t) override { return nullptr; }
 
 		rhi::QueueHandle GetQueue(rhi::QueueKind) override { return {}; }
 		void BeginUploadBatch() override {}
@@ -89,6 +89,9 @@ namespace rg_tests {
 	class MockCommandList final : public rhi::CommandList
 	{
 	public:
+		// A list carries its frame slot.
+		explicit MockCommandList(uint32_t frameSlot = 0) : rhi::CommandList(frameSlot) {}
+
 		std::vector<std::pair<rhi::TextureState, rhi::TextureState>> Barriers;
 
 		void Begin() override {}
@@ -367,7 +370,7 @@ namespace rg_tests {
 
 		MockDevice device;
 		MockCommandList commandList;
-		graph.Execute(device, commandList, 0u);
+		graph.Execute(device, commandList);
 
 		// Two live virtuals with the same desc: two physical textures.
 		CHECK(device.TextureCreates == 2);
@@ -395,7 +398,7 @@ namespace rg_tests {
 			sample.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
 
 			graph.Compile();
-			graph.Execute(device, commandList, 0u);
+			graph.Execute(device, commandList);
 		}
 
 		// Round two: the same virtual index resolves to the same physical
@@ -417,7 +420,7 @@ namespace rg_tests {
 			sample.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
 
 			graph.Compile();
-			graph.Execute(device, commandList, 0u);
+			graph.Execute(device, commandList);
 
 			// No new allocation for the scene transient in round two.
 			CHECK(device.TextureCreates == 1);
@@ -449,7 +452,7 @@ namespace rg_tests {
 
 		MockDevice device;
 		MockCommandList commandList;
-		graph.Execute(device, commandList, 0u);
+		graph.Execute(device, commandList);
 
 		// The RenderTarget -> ShaderRead edge must be emitted (alongside the
 		// first-use and export edges).
@@ -485,7 +488,7 @@ namespace rg_tests {
 
 		MockDevice device;
 		MockCommandList commandList;
-		graph.Execute(device, commandList, 0u);
+		graph.Execute(device, commandList);
 
 		CHECK(seenImported.Index == 7);
 	}
@@ -557,7 +560,7 @@ namespace rg_tests {
 			[&](size_t begin, size_t end)
 			{
 				for (size_t i = begin; i < end; i++)
-					graph.RecordPass((uint32_t)i, device, lists[i], 0u);
+					graph.RecordPass((uint32_t)i, device, lists[i]);
 			});
 
 		// The single-threaded frame-end carry.
@@ -598,99 +601,128 @@ namespace rg_tests {
 		loomPool.Shutdown();
 	}
 
-	// M-A: the record-context contract - the graph scopes each pass with
-	// the host-wired enter/leave hooks (the backend's thread-local frame
-	// index) and carries the slot in PassResources::FrameSlot, so
-	// record-side readers always resolve THIS job's slot. The tests
-	// simulate the backend shim with their own thread-local - the graph
-	// itself stays backend-neutral.
-	namespace {
-		thread_local uint32_t t_RecordContext = ~0u;
-		uint32_t TestEnterRecordContext(uint32_t slot) { uint32_t prev = t_RecordContext; t_RecordContext = slot; return prev; }
-		void TestLeaveRecordContext(uint32_t prev) { t_RecordContext = prev; }
-	}
-
-	TEST_CASE("rendergraph: RecordPass scopes the record context and PassResources carries the slot")
+	// The frame slot travels with the command list a pass records into -
+	// there is no ambient record context. The tests pin the three cases the
+	// old thread-local had to be guarded for: the plain pass, a nested job on
+	// the same worker (help-while-waiting) and a fan-out inside an ExecuteFn.
+	TEST_CASE("rendergraph: a pass reads its frame slot from the command list it records into")
 	{
 		rg::TransientTexturePool pool;
 		MockDevice device;
-		MockCommandList list;
+		MockCommandList list(7u);
 
 		rg::RenderGraph graph(pool);
-		graph.SetRecordContextHooks(&TestEnterRecordContext, &TestLeaveRecordContext);
 		rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
-		auto& pass = graph.AddPass("Scoped");
+		auto& pass = graph.AddPass("Slotted");
 		pass.Write(exported, rhi::TextureState::Present);
-		pass.SetExecute([](rhi::CommandList&, const rg::PassResources& resources) {
-			CHECK(resources.FrameSlot == 7u);
-			CHECK(t_RecordContext == 7u);
+		const rhi::CommandList* seenList = nullptr;
+		uint32_t seenSlot = ~0u;
+		pass.SetExecute([&](rhi::CommandList& commandList, const rg::PassResources&) {
+			seenList = &commandList;
+			seenSlot = commandList.FrameSlot();
 		});
 		graph.Compile();
 
-		t_RecordContext = ~0u;
-		graph.RecordPass(0, device, list, 7u);
-		CHECK(t_RecordContext == ~0u); // restored by the scope's exit
+		graph.RecordPass(0, device, list);
+		CHECK(seenList == &list);
+		CHECK(seenSlot == 7u);
+
+		// The sequential Execute hands every pass the one list it was given.
+		MockCommandList other(2u);
+		seenSlot = ~0u;
+		graph.Execute(device, other);
+		CHECK(seenList == &other);
+		CHECK(seenSlot == 2u);
 	}
 
-	TEST_CASE("rendergraph: an interleaved record job restores the outer context (help-while-waiting)")
+	TEST_CASE("rendergraph: a nested record job on the same worker keeps each pass's slot (help-while-waiting)")
 	{
 		// Loom's help-while-waiting can run a SECOND record job on the same
-		// worker while a pass waits on a counter; the per-pass scope must
-		// restore the outer job's context when the nested job exits.
+		// worker while a pass waits on a counter. With the slot on the list
+		// (not in thread-local state) the outer pass's slot is unaffected by
+		// whatever ran in between - there is nothing to restore.
 		loom::Pool loomPool; // an explicit pool (no lazy loom init)
 
 		{ // the counters die inside this scope, before the pool shuts down
 			rg::TransientTexturePool pool;
 			MockDevice device;
-			std::vector<MockCommandList> lists(2);
+			MockCommandList outerList(3u);
+			MockCommandList nestedList(5u);
 
 			rg::RenderGraph graph(pool);
-			graph.SetRecordContextHooks(&TestEnterRecordContext, &TestLeaveRecordContext);
 			rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
 
-			std::atomic<uint32_t> ctxBefore{ 0 }, ctxNested{ 0 }, ctxAfter{ 0 };
+			std::atomic<uint32_t> slotBefore{ 0 }, slotNested{ 0 }, slotAfter{ 0 };
 			loom::ScopedCounter nestedDone(1);
 
-			auto& outerPass = graph.AddPass("Outer"); // recorded at slot 3
+			auto& outerPass = graph.AddPass("Outer"); // recorded into the slot-3 list
 			outerPass.Write(exported, rhi::TextureState::Present);
-			outerPass.SetExecute([&](rhi::CommandList&, const rg::PassResources& resources) {
-				ctxBefore = t_RecordContext;
-				CHECK(resources.FrameSlot == 3u);
-				// While this worker waits, it helps the pool: the nested job
-				// (slot 5) runs here, scoped and restored by its own guard.
-				// The nested task signals AFTER its RecordPass returns, so
-				// the wait ends only once the nested scope has exited and
-				// restored.
+			outerPass.SetExecute([&](rhi::CommandList& list, const rg::PassResources&) {
+				slotBefore = list.FrameSlot();
+				// While this worker waits, it may help the pool: the nested
+				// job (the slot-5 list) can run here. The nested task signals
+				// AFTER its RecordPass returns.
 				loom::WaitFor(nestedDone.Get());
-				ctxAfter = t_RecordContext;
+				slotAfter = list.FrameSlot();
 			});
 
-			auto& nestedPass = graph.AddPass("Nested"); // recorded at slot 5
+			auto& nestedPass = graph.AddPass("Nested"); // recorded into the slot-5 list
 			nestedPass.Write(exported, rhi::TextureState::Present);
-			nestedPass.SetExecute([&](rhi::CommandList&, const rg::PassResources& resources) {
-				ctxNested = t_RecordContext;
-				CHECK(resources.FrameSlot == 5u);
+			nestedPass.SetExecute([&](rhi::CommandList& list, const rg::PassResources&) {
+				slotNested = list.FrameSlot();
 			});
 
 			graph.Compile();
 			graph.PreCreateTransients(device);
 
-			t_RecordContext = ~0u;
 			loom::ScopedCounter outerDone(1);
 			loom::Submit([&]() {
-				graph.RecordPass(0, device, lists[0], 3u);
+				graph.RecordPass(0, device, outerList);
 				loom::Signal(outerDone.Get());
 			});
 			loom::Submit([&]() {
-				graph.RecordPass(1, device, lists[1], 5u);
+				graph.RecordPass(1, device, nestedList);
 				loom::Signal(nestedDone.Get());
 			});
 			loom::WaitFor(outerDone.Get());
 
-			CHECK(ctxBefore.load() == 3u);
-			CHECK(ctxNested.load() == 5u);
-			CHECK(ctxAfter.load() == 3u); // the nested job's scope restored the outer context
-			CHECK(t_RecordContext == ~0u);
+			CHECK(slotBefore.load() == 3u);
+			CHECK(slotNested.load() == 5u);
+			CHECK(slotAfter.load() == 3u);
+		}
+
+		loomPool.Shutdown();
+	}
+
+	TEST_CASE("rendergraph: a fan-out inside an ExecuteFn hands its children the pass's slot")
+	{
+		// Job fan-out inside an ExecuteFn could not read a thread-local slot
+		// (it does not cross workers). With the slot a value on the list, a
+		// child job gets it like any other captured value.
+		loom::Pool loomPool;
+
+		{
+			rg::TransientTexturePool pool;
+			MockDevice device;
+			MockCommandList list(4u);
+
+			rg::RenderGraph graph(pool);
+			rg::RGTexture exported = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+			constexpr size_t kChildren = 64;
+			std::vector<uint32_t> childSlots(kChildren, ~0u);
+			auto& pass = graph.AddPass("Fan-out");
+			pass.Write(exported, rhi::TextureState::Present);
+			pass.SetExecute([&](rhi::CommandList& commandList, const rg::PassResources&) {
+				const uint32_t slot = commandList.FrameSlot();
+				loom::ParallelFor(0, kChildren, 1, [&](size_t begin, size_t end) {
+					for (size_t i = begin; i < end; i++)
+						childSlots[i] = slot;
+				});
+			});
+			graph.Compile();
+
+			graph.RecordPass(0, device, list);
+			CHECK(std::all_of(childSlots.begin(), childSlots.end(), [](uint32_t slot) { return slot == 4u; }));
 		}
 
 		loomPool.Shutdown();

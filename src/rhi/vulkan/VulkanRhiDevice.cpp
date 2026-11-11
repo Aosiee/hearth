@@ -1,7 +1,6 @@
 #include "tepch.h"
 #include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
 #include "Platform/Vulkan/RHI/PipelineCacheFile.h"
-#include "Platform/Vulkan/VulkanFrameContext.h" // GetRecordFrameIndex (the P-F slot pick)
 #include "Platform/Vulkan/VulkanContext.h" // the main context's GetCurrentFrameSlot (the retire queue's slot tag)
 
 #include "TinyEngine/Core/Log.h"
@@ -261,12 +260,14 @@ namespace rhi {
 
 	// ---- VulkanCommandList ------------------------------------------------------
 	// Wraps one VkCommandBuffer and resolves every handle through the owning
-	// device. Command buffers come from the device's (frame, thread)-keyed
-	// pools; v1 records on thread 0.
+	// device. Command buffers come from the device's (frame, thread)-keyed pools;
+	// the list carries the frame slot of the pool (it replaced the old thread-local
+	// record index).
 
-	VulkanCommandList::VulkanCommandList(VulkanRhiDevice* device, VkCommandBuffer commandBuffer)
-		: m_Device(device), m_CommandBuffer(commandBuffer)
+	VulkanCommandList::VulkanCommandList(VulkanRhiDevice* device, VkCommandBuffer commandBuffer, uint32_t frameSlot)
+		: CommandList(frameSlot), m_Device(device), m_CommandBuffer(commandBuffer)
 	{
+		TE_CORE_ASSERT(frameSlot < VulkanDevice::TotalFrameSlots, "a command list constructed with an out-of-range frame slot");
 	}
 
 	void VulkanCommandList::Begin()
@@ -409,14 +410,14 @@ namespace rhi {
 	{
 		// The global bindless set at set 0; the layout comes from the bound
 		// pipeline's layout, so BindPipeline must have run first.
-		// The record-side frame index picks the slot's SET. The set itself
-		// is applied ONCE per slot by the submit thread BEFORE the record
-		// fan-out (ProcessSubmittedFrame) - applying it here would update
-		// the set concurrently with the sibling workers' binds and draws on
-		// the same set (a host-access race the driver's bind path then
-		// crashes on).
+		// The list's record-side frame slot picks the slot's SET. The set
+		// itself is applied ONCE per slot by the submit thread BEFORE the
+		// record fan-out (ProcessSubmittedFrame) - applying it here would
+		// update the set concurrently with the sibling workers' binds and
+		// draws on the same set (a host-access race the driver's bind path
+		// then crashes on).
 		TE_CORE_ASSERT(m_BoundLayout != VK_NULL_HANDLE, "BindGlobalSet called before BindPipeline");
-		const uint32_t slot = GetRecordFrameIndex();
+		const uint32_t slot = FrameSlot();
 		TE_CORE_ASSERT(slot < VulkanDevice::TotalFrameSlots, "BindGlobalSet with an out-of-range record frame slot");
 		VkDescriptorSet set = m_Device->GetGlobalDescriptorSet(slot);
 		vkCmdBindDescriptorSets(m_CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_BoundLayout, 0, 1, &set, 0, nullptr);
@@ -505,26 +506,23 @@ namespace rhi {
 
 	void VulkanCommandList::BeginLabel(const char* name, bool timed)
 	{
-		m_Device->GetVulkan()->CmdBeginDebugLabel(m_CommandBuffer, name, nullptr, timed);
+		m_Device->GetVulkan()->CmdBeginDebugLabel(m_CommandBuffer, FrameSlot(), name, nullptr, timed);
 	}
 
 	void VulkanCommandList::EndLabel()
 	{
-		m_Device->GetVulkan()->CmdEndDebugLabel(m_CommandBuffer);
+		m_Device->GetVulkan()->CmdEndDebugLabel(m_CommandBuffer, FrameSlot());
 	}
 
 	void VulkanCommandList::WriteTimestamp(uint32_t queryIndex)
 	{
-		// The device's timestamp pools are frame-indexed; pick the
-		// RECORD-side frame slot when inside a record job (the pool the
-		// pass's frame will read back), else the frame-0 pool (the
-		// pre-record / no-callers path). The old form always wrote frame
-		// 0's pool, so a non-zero slot's labels would land in a pool no
-		// one reads.
-		const uint32_t frameSlot = TryGetRecordFrameIndex();
-		const uint32_t pool = frameSlot == kNoFrameSlot ? 0 : frameSlot;
+		// The device's timestamp pools are frame-indexed; the list's own
+		// slot is the pool its frame reads back. The old form always wrote
+		// frame 0's pool, so a non-zero slot's labels would land in a pool
+		// no one reads. Every list carries a slot, so the old "outside a
+		// record job, fall back to pool 0" branch is gone.
 		vkCmdWriteTimestamp(m_CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-			m_Device->GetVulkan()->GetTimestampPool(pool), queryIndex);
+			m_Device->GetVulkan()->GetTimestampPool(FrameSlot()), queryIndex);
 	}
 
 	VkCommandBuffer VulkanCommandList::GetCommandBuffer() const { return m_CommandBuffer; }
@@ -1397,21 +1395,23 @@ namespace rhi {
 		// secondary windows' extracts bucket into the MAIN window's slot
 		// (their resources are the swapchain's own, whose teardown parks
 		// the device anyway) - the documented approximation.
-		// The slot tag: the record-side index when on the record/submit
-		// thread (the resize-path destroys there), the game thread's
-		// current slot when on the game thread, and the slot 0 otherwise
-		// (the shutdown-time destroys - the unconditional drain frees
-		// those anyway; the submit thread's non-record destroys bucket
-		// into slot 0 as the documented approximation).
-		entry.Slot = TryGetRecordFrameIndex();
-		if (entry.Slot == kNoFrameSlot)
+		// The slot tag: the game thread's current slot when on the game
+		// thread, and slot 0 otherwise (the shutdown-time destroys - the
+		// unconditional drain frees those anyway; the submit thread's
+		// destroys - the resize path - bucket into slot 0 as the
+		// documented approximation).
+		// The old first branch (the thread-local record index, when a
+		// destroy ran inside a record job) is gone with the thread-local.
+		// Recording never creates or destroys device objects (the
+		// staging/atlas growth is extract-side), and a hook on the tree
+		// that still had the thread-local counted 0 record-job retires in
+		// 2153 retires (both apps' captures and 600-frame runs, the
+		// hidden two-window run), so the branch never fired.
+		entry.Slot = 0;
+		if (VulkanContext* context = m_Vulkan.TryGetMainContext())
 		{
-			entry.Slot = 0;
-			if (VulkanContext* context = m_Vulkan.TryGetMainContext())
-			{
-				if (context->IsGameThread())
-					entry.Slot = context->GetCurrentFrameSlot();
-			}
+			if (context->IsGameThread())
+				entry.Slot = context->GetCurrentFrameSlot();
 		}
 		entry.ResetTag = m_SlotResetCount[entry.Slot].load(std::memory_order_relaxed) + kRetireResetDistance;
 		m_RetireQueue.push_back(std::move(entry));
@@ -2066,7 +2066,10 @@ namespace rhi {
 			"vkAllocateCommandBuffers", __FILE__, __LINE__);
 
 		CommandListHandle handle = m_CommandLists.Acquire();
-		m_CommandLists.Publish(handle, std::unique_ptr<VulkanCommandList>(new VulkanCommandList(this, commandBuffer)));
+		// The buffer comes from frame slot 0's thread-0 pool, so the list
+		// records for slot 0 (no caller creates lists this way today; the
+		// frame records through the per-job lists).
+		m_CommandLists.Publish(handle, std::unique_ptr<VulkanCommandList>(new VulkanCommandList(this, commandBuffer, 0)));
 		return handle;
 	}
 
@@ -2081,11 +2084,11 @@ namespace rhi {
 		return m_CommandLists.Get(handle);
 	}
 
-	CommandList* VulkanRhiDevice::AdoptCommandBuffer(void* commandBuffer)
+	CommandList* VulkanRhiDevice::AdoptCommandBuffer(void* commandBuffer, uint32_t frameSlot)
 	{
 		// P-D: wraps the frame loop's live command buffer (already begun -
 		// no Begin/End). The caller deletes the returned list.
-		return new VulkanCommandList(this, (VkCommandBuffer)commandBuffer);
+		return new VulkanCommandList(this, (VkCommandBuffer)commandBuffer, frameSlot);
 	}
 
 	QueueHandle VulkanRhiDevice::GetQueue(QueueKind kind)

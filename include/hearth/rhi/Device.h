@@ -151,7 +151,10 @@ namespace rhi {
 		// P-D: adopts a LIVE frame command buffer (begun by the frame loop)
 		// as a CommandList for the calling layer to record into. No Begin/
 		// End - the buffer is already recording. The caller deletes it.
-		virtual CommandList* AdoptCommandBuffer(void* commandBuffer) = 0;
+		// `frameSlot` is the slot the buffer records for (the record job's
+		// - the caller received it with the buffer); the adopted list
+		// carries it.
+		virtual CommandList* AdoptCommandBuffer(void* commandBuffer, uint32_t frameSlot) = 0;
 
 		virtual QueueHandle GetQueue(QueueKind kind) = 0;
 
