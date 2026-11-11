@@ -519,8 +519,7 @@ namespace rg_tests {
 		// transients, then RecordPass fans out to loom workers with one mock
 		// list per pass, and the final-state carry runs single-threaded
 		// afterwards. Runs under TSAN in the tinytest dev-tsan config.
-		loom::Shutdown();
-		loom::Init();
+		loom::Pool loomPool; // an explicit pool (no lazy loom init)
 
 		rg::TransientTexturePool pool;
 		MockDevice device;
@@ -596,7 +595,7 @@ namespace rg_tests {
 			CHECK(device.TextureCreates == 3); // a fresh texture, not the graph-0 one
 		}
 
-		loom::Shutdown();
+		loomPool.Shutdown();
 	}
 
 	// M-A: the record-context contract - the graph scopes each pass with
@@ -638,8 +637,7 @@ namespace rg_tests {
 		// Loom's help-while-waiting can run a SECOND record job on the same
 		// worker while a pass waits on a counter; the per-pass scope must
 		// restore the outer job's context when the nested job exits.
-		loom::Shutdown();
-		loom::Init();
+		loom::Pool loomPool; // an explicit pool (no lazy loom init)
 
 		{ // the counters die inside this scope, before the pool shuts down
 			rg::TransientTexturePool pool;
@@ -695,7 +693,7 @@ namespace rg_tests {
 			CHECK(t_RecordContext == ~0u);
 		}
 
-		loom::Shutdown();
+		loomPool.Shutdown();
 	}
 
 } // namespace rg_tests
