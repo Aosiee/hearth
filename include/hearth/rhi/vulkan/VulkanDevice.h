@@ -1,6 +1,7 @@
 #pragma once
 
 #include "TinyEngine/Debug/Profiler.h"
+#include "TinyEngine/Debug/GpuFrameDebugData.h"
 
 #include "Platform/Vulkan/VulkanCommon.h"
 
@@ -132,6 +133,20 @@ namespace TinyEngine {
 
 		bool IsValidationEnabled() const { return m_ValidationEnabled; }
 
+#if !defined(TE_CONF_DIST)
+		// The GPU frame debugger's sink, owned by the RhiDevice subsystem
+		// (which owns this device, so the sink outlives every writer). Set
+		// before Init - the instance's chained messenger reports through it
+		// (its pUserData). The record passes and the submit thread write
+		// through GetGpuFrameDebugSink.
+		void SetGpuFrameDebugSink(GpuFrameDebugSink* sink) { m_GpuFrameDebugSink = sink; }
+		GpuFrameDebugSink& GetGpuFrameDebugSink() const
+		{
+			TE_CORE_ASSERT(m_GpuFrameDebugSink, "VulkanDevice: the GPU frame debug sink was never set (RhiDevice::Init sets it)");
+			return *m_GpuFrameDebugSink;
+		}
+#endif
+
 		// Anisotropic filtering is an optional device feature, not something
 		// every Vulkan implementation is required to support, unlike GL where
 		// GL_TEXTURE_MAX_ANISOTROPY is just always there to query a limit from.
@@ -171,8 +186,8 @@ namespace TinyEngine {
 		// timestamps from the *previous* time this slot was used (guaranteed
 		// complete by the fence wait) into GpuFrameDebugInfo, then clears this
 		// slot's bookkeeping ready for new Begin/EndDebugLabel calls this frame.
-		// isMainWindow gates the GpuFrameDebugInfo sink (a single global the
-		// editor's GPU frame debugger reads) - secondary windows still get
+		// isMainWindow gates the GpuFrameDebugInfo sink (the one the editor's
+		// GPU frame debugger reads) - secondary windows still get
 		// their own per-slot bookkeeping, they just don't publish into it.
 		void BeginProfilingFrame(uint32_t frameIndex, bool isMainWindow = true);
 
@@ -250,6 +265,9 @@ namespace TinyEngine {
 	private:
 		VkInstance m_Instance = VK_NULL_HANDLE;
 		VkDebugUtilsMessengerEXT m_DebugMessenger = VK_NULL_HANDLE;
+#if !defined(TE_CONF_DIST)
+		GpuFrameDebugSink* m_GpuFrameDebugSink = nullptr; // owned by the RhiDevice subsystem
+#endif
 
 		VkPhysicalDevice m_PhysicalDevice = VK_NULL_HANDLE;
 		VkDevice m_Device = VK_NULL_HANDLE;

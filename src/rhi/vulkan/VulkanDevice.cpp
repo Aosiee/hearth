@@ -23,7 +23,7 @@ namespace TinyEngine {
 		// debug-utils/validation machinery compiles out of TE_CONF_DIST
 		// builds (audit rows A4/A8).
 #if !defined(TE_CONF_DIST)
-		const char* g_ValidationLayerName = "VK_LAYER_KHRONOS_validation";
+		constexpr const char* g_ValidationLayerName = "VK_LAYER_KHRONOS_validation";
 
 		// Kept separate from the log itself (Log.h has no ring buffer, and
 		// giving it one just for this would be a bigger change than the GPU
@@ -31,9 +31,10 @@ namespace TinyEngine {
 		// noisy run doesn't grow this forever.
 		constexpr size_t kMaxBufferedValidationMessages = 50;
 
-		void BufferValidationMessage(VkDebugUtilsMessageSeverityFlagBitsEXT severity, const char* message)
+		void BufferValidationMessage(GpuFrameDebugSink* sink, VkDebugUtilsMessageSeverityFlagBitsEXT severity, const char* message)
 		{
-#if !defined(TE_CONF_DIST)
+			if (!sink)
+				return;
 			const char* severityText = "INFO";
 			if (severity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
 				severityText = "ERROR";
@@ -41,16 +42,13 @@ namespace TinyEngine {
 				severityText = "WARN";
 
 			// T-F-C: the messenger fires on whichever thread made the call -
-			// the append serializes with the submit thread's frame writes.
-#if !defined(TE_CONF_DIST)
-			std::lock_guard lock(GpuFrameDebugInfoMutex());
-			std::vector<std::string>& messages = GetMutableGpuFrameDebugInfo().ValidationMessages;
+			// the append serializes with the submit thread's frame writes
+			// (the sink's lock).
+			GpuFrameDebugSink::Writer debug = sink->Write();
+			std::vector<std::string>& messages = debug.Info.ValidationMessages;
 			messages.insert(messages.begin(), std::string("[") + severityText + "] " + message);
 			if (messages.size() > kMaxBufferedValidationMessages)
 				messages.resize(kMaxBufferedValidationMessages);
-#endif // !TE_CONF_DIST
-#endif // !TE_CONF_DIST
-			(void)severity; (void)message;
 		}
 
 		VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(
@@ -60,7 +58,6 @@ namespace TinyEngine {
 			void* userData)
 		{
 			(void)type;
-			(void)userData;
 
 			// F6: log the VUID id alongside the message - the pMessage-only
 			// log dropped the VUID name, which let THREADING ERRORs (no VUID
@@ -82,7 +79,9 @@ namespace TinyEngine {
 					break;
 			}
 
-			BufferValidationMessage(severity, callbackData->pMessage);
+			// The sink travels as the messenger's pUserData (the RhiDevice
+			// subsystem's member).
+			BufferValidationMessage(static_cast<GpuFrameDebugSink*>(userData), severity, callbackData->pMessage);
 
 			// Returning true here would abort the call that triggered the message,
 			// which is almost never what you want outside of a targeted test.
@@ -317,6 +316,7 @@ namespace TinyEngine {
 				| VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
 				| VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
 			messengerCreateInfo.pfnUserCallback = DebugMessengerCallback;
+			messengerCreateInfo.pUserData = m_GpuFrameDebugSink;
 
 			createInfo.pNext = &messengerCreateInfo;
 		}
@@ -338,6 +338,7 @@ namespace TinyEngine {
 			| VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
 			| VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
 		createInfo.pfnUserCallback = DebugMessengerCallback;
+		createInfo.pUserData = m_GpuFrameDebugSink;
 
 		VK_CHECK(vkCreateDebugUtilsMessengerEXT(m_Instance, &createInfo, nullptr, &m_DebugMessenger));
 	}
@@ -1095,8 +1096,8 @@ namespace TinyEngine {
 	{
 		TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "BeginProfilingFrame frame index out of range!");
 #if !defined(TE_CONF_DIST)
-		GpuFrameDebugInfo& debugInfo = GetMutableGpuFrameDebugInfo();
-		std::lock_guard lock(GpuFrameDebugInfoMutex());
+		GpuFrameDebugSink::Writer debug = GetGpuFrameDebugSink().Write();
+		GpuFrameDebugInfo& debugInfo = debug.Info;
 #endif // !TE_CONF_DIST
 
 		// The counter keeps counting past the pool on an overflow frame (A10).
