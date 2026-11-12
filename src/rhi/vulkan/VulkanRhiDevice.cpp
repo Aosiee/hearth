@@ -848,9 +848,11 @@ namespace rhi {
 			if (slot.Alive && slot.Object)
 				QueueSamplerForDestruction(slot.Object->GetHandle());
 		}
+		// A Retiring buffer's entry was freed (and its slot released) by the
+		// drain above; the check keeps a straggler from being queued twice.
 		for (const auto& slot : m_Buffers.Slots)
 		{
-			if (slot.Alive && slot.Object && !slot.Object->IsExternal())
+			if (slot.Alive && slot.Object && !slot.Retiring)
 				QueueBufferForDestruction(slot.Object->GetHandle(), slot.Object->GetAllocation());
 		}
 		for (const auto& slot : m_Textures.Slots)
@@ -1328,12 +1330,13 @@ namespace rhi {
 		QueueRetire(std::move(entry));
 	}
 
-	void VulkanRhiDevice::QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex)
+	void VulkanRhiDevice::QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex, BufferHandle slot)
 	{
 		RetireEntry entry;
 		entry.Kind_ = RetireEntry::Kind::Buffer;
 		entry.Buffer = buffer;
 		entry.Allocation = allocation;
+		entry.BufferSlot = slot;
 		entry.BindlessIndex = bindlessIndex;
 		entry.HasBindlessIndex = bindlessIndex < kBindlessBuffers;
 
@@ -1435,23 +1438,37 @@ namespace rhi {
 
 	void VulkanRhiDevice::FreeRetireEntry(const RetireEntry& entry)
 	{
-		// An adopted buffer's slot carries no Vk object and no descriptor:
-		// only the handle table entry frees (its own lock), the same release
-		// DestroyBuffer gives an external handle - outside the descriptor
-		// log lock, which it never needs.
-		if (entry.Kind_ == RetireEntry::Kind::ExternalBufferSlot)
+		// A destroyed RHI buffer's Retiring table slot releases with its
+		// VkBuffer - the handle resolved until now (the record of a frame
+		// that named it is done by the slot's reset tag). The slot releases
+		// BEFORE the VkBuffer is destroyed (the entry carries its own
+		// Buffer/Allocation copies): a future reset-tag violation then
+		// resolves to VK_NULL_HANDLE, which validation reports, never to a
+		// destroyed VkBuffer. The table's own lock, outside the descriptor
+		// log lock, which the release never needs.
+		if (entry.Kind_ == RetireEntry::Kind::Buffer && IsValid(entry.BufferSlot))
 		{
-			if (VulkanBuffer* buffer = m_Buffers.Get(entry.ExternalBuffer))
-			{
-				TE_CORE_ASSERT(buffer->IsExternal(), "an external-slot retire entry names an owned buffer");
-				buffer->Shutdown();
-			}
-			const bool released = m_Buffers.Release(entry.ExternalBuffer);
-			TE_CORE_ASSERT(released, "retiring an invalid/stale adopted RHI buffer");
+			const bool released = m_Buffers.Release(entry.BufferSlot);
+			TE_CORE_ASSERT(released, "retiring an invalid/stale RHI buffer slot");
 			(void)released;
-			return;
 		}
 
+		FreeRetireEntryObjects(entry);
+	}
+
+	bool VulkanRhiDevice::IsBufferSlotRecycled(BufferHandle handle) const
+	{
+		std::shared_lock lock(m_Buffers.Mutex);
+		if (handle.Index >= m_Buffers.Slots.size())
+			return false;
+		const auto& slot = m_Buffers.Slots[handle.Index];
+		if (slot.Alive || slot.Generation == handle.Generation)
+			return false;
+		return std::find(m_Buffers.Free.begin(), m_Buffers.Free.end(), handle.Index) != m_Buffers.Free.end();
+	}
+
+	void VulkanRhiDevice::FreeRetireEntryObjects(const RetireEntry& entry)
+	{
 		// P-F: the destruction of a texture's Vk view and the purge of its
 		// REAL log entries must be atomic w.r.t. ApplyDescriptorLog - a
 		// record worker mid-apply holds this mutex, so destroying the view
@@ -1489,8 +1506,6 @@ namespace rhi {
 			if (entry.Sampler != VK_NULL_HANDLE)
 				vkDestroySampler(m_Vulkan.GetDevice(), entry.Sampler, nullptr);
 			break;
-		case RetireEntry::Kind::ExternalBufferSlot:
-			break; // handled above, outside the lock
 		}
 		if (entry.HasBindlessIndex)
 		{
@@ -1608,10 +1623,18 @@ namespace rhi {
 	BufferHandle VulkanRhiDevice::CreateBuffer(const BufferDesc& desc, const char* debugName)
 	{
 		TE_CORE_ASSERT(m_Initialized, "RHI buffer created before the device");
-		VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT
-			| VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-		if (desc.StorageUsage)
+		TE_CORE_ASSERT(desc.Usage != BufferUsage::None, "RHI buffer created with no usage (BufferDesc::Usage is explicit)");
+		VkBufferUsageFlags usage = 0;
+		if (HasUsage(desc.Usage, BufferUsage::Vertex))
+			usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+		if (HasUsage(desc.Usage, BufferUsage::Index))
+			usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+		if (HasUsage(desc.Usage, BufferUsage::Storage))
 			usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		// A device-local buffer is filled only through UploadBufferViaStaging
+		// (the static upload), so it is always a transfer destination.
+		if (HasUsage(desc.Usage, BufferUsage::TransferDst) || !desc.HostVisible)
+			usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
 		BufferHandle handle = m_Buffers.Acquire();
 		VulkanBuffer* buffer = new VulkanBuffer();
@@ -1622,38 +1645,16 @@ namespace rhi {
 
 	void VulkanRhiDevice::DestroyBuffer(BufferHandle handle)
 	{
-		if (VulkanBuffer* buffer = m_Buffers.Get(handle))
-		{
-			if (buffer->IsExternal())
-				buffer->Shutdown(); // slot release only - the mesh owns the VkBuffer
-			else
-				QueueBufferForDestruction(buffer->GetHandle(), buffer->GetAllocation(), buffer->GetBindlessIndex());
-		}
-		// Hoisted out of the assert: the Release is a real side effect and
-		// must run in every config (in release/shipping the assert argument
-		// is compiled out, leaving the slot alive and the ShutdownDevice
-		// sweep double-queues the freed object).
-		const bool bufferReleased = m_Buffers.Release(handle);
-		TE_CORE_ASSERT(bufferReleased, "destroying an invalid/stale RHI buffer");
-	}
-
-	BufferHandle VulkanRhiDevice::AdoptExternalBuffer(VkBuffer buffer, VmaAllocation allocation)
-	{
-		TE_CORE_ASSERT(m_Initialized, "RHI buffer adopted before the device");
-		BufferHandle handle = m_Buffers.Acquire();
-		VulkanBuffer* adopted = new VulkanBuffer();
-		adopted->Adopt(buffer, allocation);
-		m_Buffers.Publish(handle, std::unique_ptr<VulkanBuffer>(adopted));
-		return handle;
-	}
-
-	void VulkanRhiDevice::RetireExternalBuffer(BufferHandle handle)
-	{
-		TE_CORE_ASSERT(m_Buffers.Get(handle) && m_Buffers.Get(handle)->IsExternal(), "RetireExternalBuffer on an invalid or owned buffer handle");
-		RetireEntry entry;
-		entry.Kind_ = RetireEntry::Kind::ExternalBufferSlot;
-		entry.ExternalBuffer = handle;
-		QueueRetire(std::move(entry));
+		// The slot is marked Retiring (dead to the owner) and released by
+		// FreeRetireEntry with the VkBuffer, so the submit thread's
+		// in-flight record of the previous frame can still resolve the
+		// handle. BeginRetire is a real side effect, kept out of the assert
+		// so it runs in every config (a slot left alive is double-queued by
+		// the ShutdownDevice sweep).
+		VulkanBuffer* buffer = m_Buffers.BeginRetire(handle);
+		TE_CORE_ASSERT(buffer, "destroying an invalid/stale RHI buffer");
+		if (buffer)
+			QueueBufferForDestruction(buffer->GetHandle(), buffer->GetAllocation(), buffer->GetBindlessIndex(), handle);
 	}
 
 	void VulkanRhiDevice::WriteBindlessBuffer(uint32_t index, BufferHandle handle)
@@ -1681,7 +1682,10 @@ namespace rhi {
 	void VulkanRhiDevice::UploadBufferViaStaging(BufferHandle handle, const void* data, uint64_t size)
 	{
 		if (VulkanBuffer* buffer = m_Buffers.Get(handle))
+		{
+			TE_CORE_ASSERT((buffer->GetUsage() & VK_BUFFER_USAGE_TRANSFER_DST_BIT) != 0, "UploadBufferViaStaging into a buffer created without transfer-dst usage");
 			buffer->UploadViaStaging(data, size);
+		}
 	}
 
 	// ---- Texture ------------------------------------------------------------------
@@ -2220,8 +2224,10 @@ namespace rhi {
 		// The field read happens under the table's shared lock: the wrapper
 		// may be freed by a concurrent game-thread Release the instant the
 		// lock drops (the record workers read these during record).
+		// A Retiring slot still resolves (the record of a frame that drew it
+		// may run after its owner died).
 		std::shared_lock lock(m_Buffers.Mutex);
-		if (const VulkanBuffer* buffer = m_Buffers.GetNoLock(handle))
+		if (const VulkanBuffer* buffer = m_Buffers.GetResolvableNoLock(handle))
 			return buffer->GetHandle();
 		return VK_NULL_HANDLE;
 	}

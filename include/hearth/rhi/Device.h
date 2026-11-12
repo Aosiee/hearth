@@ -20,11 +20,25 @@ namespace rhi {
 
 	class CommandList;
 
+	// A buffer's explicit usage - CreateBuffer creates exactly the flags it is
+	// given (no fixed superset). A device-local buffer implies TransferDst:
+	// UploadBufferViaStaging is the only way to fill it.
+	enum class BufferUsage : uint8_t
+	{
+		None        = 0,
+		Vertex      = 1 << 0,
+		Index       = 1 << 1,
+		Storage     = 1 << 2,
+		TransferDst = 1 << 3,
+	};
+	constexpr BufferUsage operator|(BufferUsage a, BufferUsage b) { return (BufferUsage)((uint8_t)a | (uint8_t)b); }
+	constexpr bool HasUsage(BufferUsage set, BufferUsage flag) { return ((uint8_t)set & (uint8_t)flag) != 0; }
+
 	struct BufferDesc
 	{
-		uint64_t Size = 0;
-		bool     HostVisible = false;
-		bool     StorageUsage = false; // storage-buffer usage
+		uint64_t    Size = 0;
+		bool        HostVisible = false;
+		BufferUsage Usage = BufferUsage::None; // must be set (CreateBuffer asserts)
 	};
 
 	struct TextureDesc
@@ -103,6 +117,10 @@ namespace rhi {
 		virtual ~Device() = default;
 
 		virtual BufferHandle CreateBuffer(const BufferDesc& desc, const char* debugName) = 0;
+		// The handle is dead to its owner at once, but record-side
+		// resolution continues until the retire frees it (in-flight draws
+		// carry handles, not Refs) - a backend must not release the slot
+		// immediately.
 		virtual void DestroyBuffer(BufferHandle handle) = 0;
 		virtual void SetBufferData(BufferHandle handle, const void* data, uint64_t size, uint64_t offset = 0) = 0;
 		virtual void UploadBufferViaStaging(BufferHandle handle, const void* data, uint64_t size) = 0;

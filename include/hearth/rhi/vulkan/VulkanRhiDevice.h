@@ -187,7 +187,6 @@ namespace rhi {
 		// NoteSlotReset this many times once its GPU work is done, so every
 		// entry still tagged to the slot frees.
 		static constexpr uint64_t kRetireResetDistance = 2;
-		void QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex = ~0u);
 		void QueuePipelineForDestruction(VkPipeline pipeline, VkPipelineLayout layout);
 		void QueueShaderForDestruction(VkShaderModule shader);
 		void QueueSamplerForDestruction(VkSampler sampler);
@@ -217,6 +216,14 @@ namespace rhi {
 		// buffer-retire self-test asserts the mesh destruction path queues
 		// instead of destroying synchronously).
 		size_t GetRetireQueueSize() const;
+
+		// Dev/test accessors (the self-test's Retiring-slot checks):
+		// owner-live = the owner-side lookup resolves (false from
+		// DestroyBuffer on - a second destroy is rejected); recycled = the
+		// table slot was released (generation bumped) and its index is back
+		// in the free list.
+		bool IsBufferOwnerLive(BufferHandle handle) const { return m_Buffers.Get(handle) != nullptr; }
+		bool IsBufferSlotRecycled(BufferHandle handle) const;
 		size_t GetPipelineCacheSize() const { return m_PipelineCache.size(); }
 		// The reload no-op guard compares the re-read SPIR-V against
 		// the shader's current module (nullptr when absent).
@@ -227,16 +234,17 @@ namespace rhi {
 		}
 
 		// ---- Device -------------------------------------------------------
+		// creates exactly desc.Usage (a device-local buffer adds
+		// TRANSFER_DST, its staging-upload target).
 		BufferHandle CreateBuffer(const BufferDesc& desc, const char* debugName) override;
+		// Retires the buffer and its table slot together through the retire
+		// queue (game thread, like every QueueRetire). From this call on the
+		// handle is dead to its owner (every owner-side lookup fails, a
+		// second destroy asserts), but the record-side resolution
+		// (GetBufferHandle) keeps resolving it until the free - the frame
+		// still recording on the submit thread may name it (a PendingDraw
+		// carries handles, not Refs).
 		void DestroyBuffer(BufferHandle handle) override;
-		// P-C: borrows an engine-owned buffer (a Mesh's VulkanVertexBuffer/
-		// VulkanIndexBuffer) as a non-owning handle so draws can go through
-		// BufferHandles; DestroyBuffer on it releases the slot only.
-		BufferHandle AdoptExternalBuffer(VkBuffer buffer, VmaAllocation allocation);
-		// An adopted handle's slot, released through the retire queue (an
-		// in-flight frame's record may still resolve the handle) - the borrow
-		// table's re-borrow path. Game thread, like every QueueRetire.
-		void RetireExternalBuffer(BufferHandle handle);
 		void SetBufferData(BufferHandle handle, const void* data, uint64_t size, uint64_t offset = 0) override;
 		// The capture sidecar's read of a host-visible buffer (null otherwise).
 		const void* GetBufferMappedData(BufferHandle handle);
@@ -298,6 +306,14 @@ namespace rhi {
 		VkPipelineLayout GetPipelineLayout(PipelineHandle handle) const;
 
 	private:
+		// `slot` (DestroyBuffer's) is the RHI handle whose table slot
+		// releases WITH the buffer at the free, so a handle a pipelined
+		// record still names keeps resolving until then. Invalid = a raw
+		// buffer with no live slot (the shutdown sweep). Private:
+		// DestroyBuffer is the one entry point that marks and retires a table
+		// slot.
+		void QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex = ~0u, BufferHandle slot = {});
+
 		// P-A3: the global bindless set and the retire
 		// queue. The stamp is the value the NEXT submit will signal
 		// - the earliest submission that could reference the object.
@@ -347,7 +363,7 @@ namespace rhi {
 
 		struct RetireEntry
 		{
-			enum class Kind : uint8_t { Texture, Buffer, Pipeline, Shader, Sampler, ExternalBufferSlot };
+			enum class Kind : uint8_t { Texture, Buffer, Pipeline, Shader, Sampler };
 
 			Kind        Kind_ = Kind::Texture;
 			// The frame-boundary tag - the entry frees once the SLOT's
@@ -365,9 +381,10 @@ namespace rhi {
 			VkPipeline  Pipeline = VK_NULL_HANDLE;
 			VkPipelineLayout Layout = VK_NULL_HANDLE;
 			VkShaderModule ShaderModule = VK_NULL_HANDLE;
-			// ExternalBufferSlot: the adopted handle whose table slot frees
-			// (the VkBuffer is the engine mesh's - never destroyed here).
-			BufferHandle ExternalBuffer;
+			// Buffer: the RHI handle whose (retiring) table slot releases
+			// before the VkBuffer is destroyed - the entry carries its own
+			// copies (invalid = no slot to release).
+			BufferHandle BufferSlot;
 			uint32_t    BindlessIndex = 0;
 			bool        HasBindlessIndex = false;
 			// P-F: the tombstone log write's seq (0 = none). The index is
@@ -377,6 +394,8 @@ namespace rhi {
 		};
 		void QueueRetire(RetireEntry&& entry);
 		void FreeRetireEntry(const RetireEntry& entry);
+		// The Vk objects + the bindless index (under the descriptor log lock).
+		void FreeRetireEntryObjects(const RetireEntry& entry);
 		// The dev assert every retire-queue access goes through (the game
 		// thread is its one owner).
 		void AssertRetireQueueOwner(const char* entryPoint) const;
@@ -389,19 +408,22 @@ namespace rhi {
 		{
 			// The handle tables are read by the Loom record workers
 			// (GetBufferHandle/GetTextureView during record) while the game
-			// thread's extract mutates them
-			// (AdoptExternalBuffer/CreateBuffer/DestroyBuffer + streaming
-			// creates) - a plain vector reallocation torn by a concurrent
-			// Get() is a data race that corrupts the borrowed handle and
-			// SIGSEGVs in the driver. Readers take the shared lock (readers
-			// don't block readers); writers take the exclusive lock (they are
-			// infrequent, game-thread-only) - the same shape as the
-			// descriptor write log's mutex.
+			// thread's extract mutates them (CreateBuffer/DestroyBuffer +
+			// streaming creates and the retire-queue frees) - a plain vector
+			// reallocation torn by a concurrent Get() is a data race that
+			// corrupts the handle and SIGSEGVs in the driver. Readers take
+			// the shared lock (readers don't block readers); writers take the
+			// exclusive lock (they are infrequent, game-thread-only) - the
+			// same shape as the descriptor write log's mutex.
 			struct Slot
 			{
 				std::unique_ptr<TObject> Object;
 				uint32_t Generation = 0;
 				bool Alive = false;
+				// Destroyed by its owner, the release pending in the retire
+				// queue (buffers only). Get() treats it as gone;
+				// GetResolvableNoLock still resolves it.
+				bool Retiring = false;
 			};
 			std::vector<Slot> Slots;
 			std::vector<uint32_t> Free;
@@ -423,6 +445,7 @@ namespace rhi {
 				}
 				Slot& slot = Slots[index];
 				slot.Alive = true;
+				slot.Retiring = false;
 				slot.Object.reset();
 				THandle handle;
 				handle.Index = index;
@@ -440,6 +463,7 @@ namespace rhi {
 				Slot& slot = Slots[handle.Index];
 				slot.Object.reset();
 				slot.Alive = false;
+				slot.Retiring = false;
 				slot.Generation++;
 				Free.push_back(handle.Index);
 				return true;
@@ -457,11 +481,32 @@ namespace rhi {
 			// concurrent Release).
 			TObject* GetNoLock(const THandle& handle) const
 			{
+				TObject* object = GetResolvableNoLock(handle);
+				return object && !Slots[handle.Index].Retiring ? object : nullptr;
+			}
+
+			// The record-side lookup: also resolves a Retiring slot (its
+			// object lives until the retire queue releases it, and a
+			// pipelined frame's record may still name the handle).
+			TObject* GetResolvableNoLock(const THandle& handle) const
+			{
 				if (handle.Index >= Slots.size() || !Slots[handle.Index].Alive)
 					return nullptr;
 				if (Slots[handle.Index].Generation != handle.Generation)
 					return nullptr;
 				return Slots[handle.Index].Object.get();
+			}
+
+			// The owner's destroy - marks the live slot Retiring and returns
+			// its object (nullptr for an invalid, stale or already-retiring
+			// handle). Release frees it.
+			TObject* BeginRetire(const THandle& handle)
+			{
+				std::unique_lock lock(Mutex);
+				TObject* object = GetNoLock(handle);
+				if (object)
+					Slots[handle.Index].Retiring = true;
+				return object;
 			}
 
 			// Publishes the slot's object AFTER the (slow) caller-side

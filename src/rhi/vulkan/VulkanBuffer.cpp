@@ -7,6 +7,7 @@ namespace TinyEngine {
 	{
 		m_Device = &device;
 		m_Size = size;
+		m_Usage = usage;
 
 		VkBufferCreateInfo bufferCreateInfo{};
 		bufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -34,13 +35,13 @@ namespace TinyEngine {
 
 	void VulkanBuffer::Shutdown()
 	{
-		if (m_Buffer != VK_NULL_HANDLE && !m_External)
+		if (m_Buffer != VK_NULL_HANDLE)
 			vmaDestroyBuffer(m_Device->GetAllocator(), m_Buffer, m_Allocation);
 
 		m_Buffer = VK_NULL_HANDLE;
 		m_Allocation = VK_NULL_HANDLE;
 		m_MappedData = nullptr;
-		m_External = false;
+		m_Usage = 0;
 		m_Device = nullptr;
 	}
 

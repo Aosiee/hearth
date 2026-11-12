@@ -7,8 +7,9 @@ namespace TinyEngine {
 
 	// Thin RAII wrapper around a VkBuffer and its VMA managed device memory.
 	// This is a Vulkan implementation detail, engine code never touches it
-	// directly, VulkanVertexBuffer/VulkanIndexBuffer (and uniform/storage
-	// buffers) are built on top of it.
+	// directly: the RHI's buffer table holds one per BufferHandle (the
+	// engine's VulkanVertexBuffer/VulkanIndexBuffer own such a handle), and a
+	// few backend-internal staging/readback buffers use it directly.
 	class VulkanBuffer
 	{
 	public:
@@ -20,29 +21,6 @@ namespace TinyEngine {
 		// staging buffer (see UploadViaStaging) rather than mapped directly.
 		void Init(VulkanDevice& device, VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible, const std::string& debugName);
 		void Shutdown();
-
-		// Clears the ownership fields WITHOUT destroying - for buffers
-		// handed to the RHI's retire queue (the mesh vertex/index
-		// destruction path), so nothing double-frees them.
-		void Detach()
-		{
-			m_Buffer = VK_NULL_HANDLE;
-			m_Allocation = VK_NULL_HANDLE;
-			m_MappedData = nullptr;
-			m_External = false;
-			m_Device = nullptr;
-		}
-
-		// P-C: a borrowed entry - the buffer (and its allocation) belong to
-		// someone else (an engine Mesh's VulkanVertexBuffer/VulkanIndexBuffer);
-		// Shutdown then only clears the borrow, never destroys.
-		void Adopt(VkBuffer buffer, VmaAllocation allocation)
-		{
-			m_External = true;
-			m_Buffer = buffer;
-			m_Allocation = allocation;
-		}
-		bool IsExternal() const { return m_External; }
 
 		// Only valid on a host visible buffer, writes straight into the
 		// persistently mapped pointer. There's no explicit flush call because
@@ -60,6 +38,9 @@ namespace TinyEngine {
 
 		VkBuffer GetHandle() const { return m_Buffer; }
 		VkDeviceSize GetSize() const { return m_Size; }
+		// The usage flags Init created it with (the RHI's staging-upload
+		// assert reads TRANSFER_DST from it).
+		VkBufferUsageFlags GetUsage() const { return m_Usage; }
 		VmaAllocation GetAllocation() const { return m_Allocation; }
 		// The host-visible staging's persistently-mapped pointer (the
 		// IBL readback's memcpy source).
@@ -77,7 +58,7 @@ namespace TinyEngine {
 		VmaAllocation m_Allocation = VK_NULL_HANDLE;
 		VkDeviceSize m_Size = 0;
 		void* m_MappedData = nullptr;
-		bool m_External = false;
+		VkBufferUsageFlags m_Usage = 0;
 		uint32_t m_BindlessIndex = ~0u;
 	};
 
