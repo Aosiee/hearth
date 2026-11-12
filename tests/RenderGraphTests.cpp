@@ -73,7 +73,6 @@ namespace rg_tests {
 		rhi::CommandListHandle CreateCommandList(rhi::QueueHandle, uint32_t) override { return {}; }
 		void DestroyCommandList(rhi::CommandListHandle) override {}
 		rhi::CommandList* GetCommandList(rhi::CommandListHandle) override { return nullptr; }
-		rhi::CommandList* AdoptCommandBuffer(void*, uint32_t) override { return nullptr; }
 
 		rhi::QueueHandle GetQueue(rhi::QueueKind) override { return {}; }
 		void BeginUploadBatch() override {}

@@ -2100,13 +2100,6 @@ namespace rhi {
 		return m_CommandLists.Get(handle);
 	}
 
-	CommandList* VulkanRhiDevice::AdoptCommandBuffer(void* commandBuffer, uint32_t frameSlot)
-	{
-		// P-D: wraps the frame loop's live command buffer (already begun -
-		// no Begin/End). The caller deletes the returned list.
-		return new VulkanCommandList(this, (VkCommandBuffer)commandBuffer, frameSlot);
-	}
-
 	QueueHandle VulkanRhiDevice::GetQueue(QueueKind kind)
 	{
 		// v1: all three kinds resolve to the single graphics queue.
