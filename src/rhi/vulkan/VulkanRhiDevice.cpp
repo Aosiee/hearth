@@ -1385,36 +1385,46 @@ namespace rhi {
 	void VulkanRhiDevice::QueueRetire(RetireEntry&& entry)
 	{
 		// The frame-boundary tagging - the entry frees once the SLOT's
-		// record-start resets reach the tag (the frame's own command
-		// buffers referencing the object are freed at the slot's reset
-		// TWO record-starts later, and that reset's acquire-fence wait
-		// covers the frame's submission completion). No timeline
-		// prediction: an interleaved upload batch or another window's
-		// submit can no longer consume the stamp (the old
-		// last-submitted+1 form freed one submission early). The
-		// secondary windows' extracts bucket into the MAIN window's slot
-		// (their resources are the swapchain's own, whose teardown parks
-		// the device anyway) - the documented approximation.
-		// The slot tag: the game thread's current slot when on the game
-		// thread, and slot 0 otherwise (the shutdown-time destroys - the
-		// unconditional drain frees those anyway; the submit thread's
-		// destroys - the resize path - bucket into slot 0 as the
-		// documented approximation).
-		// The old first branch (the thread-local record index, when a
-		// destroy ran inside a record job) is gone with the thread-local.
-		// Recording never creates or destroys device objects (the
-		// staging/atlas growth is extract-side), and a hook on the tree
-		// that still had the thread-local counted 0 record-job retires in
-		// 2153 retires (both apps' captures and 600-frame runs, the
-		// hidden two-window run), so the branch never fired.
+		// record-start resets reach the tag (the frame's own command buffers
+		// referencing the object are freed at the slot's reset TWO
+		// record-starts later, and that reset's acquire-fence wait covers
+		// the frame's submission completion). No timeline prediction: an
+		// interleaved upload batch or another window's submit can no longer
+		// consume the stamp (the old last-submitted+1 form freed one
+		// submission early). The secondary windows' extracts bucket into the
+		// MAIN window's slot (their resources are the swapchain's own, whose
+		// teardown parks the device anyway) - the documented approximation.
+		// The retire queue is game-thread-owned - asserted here, in both
+		// drains and in the size accessor. A GPU object's last Ref dropped
+		// on any other thread is a defect, not a case to bucket: a caller
+		// census counted 0 non-game callers in 18400 retires (the captures,
+		// the 600-frame and two-window runs, forced swapchain rebuilds, the
+		// load/evict churn). The swapchain rebuild runs on the game thread
+		// under the submit-idle park; asset workers only parse; recording
+		// never creates or destroys device objects.
+		// The slot tag is the game thread's current slot, read from the main
+		// context. The one named exception is NO main context: before the
+		// first window's Init, and after the main window's teardown cleared
+		// it (the shutdown-time destroys). Those entries tag slot 0, and the
+		// ShutdownDevice unconditional drain frees them.
+		AssertRetireQueueOwner("QueueRetire");
 		entry.Slot = 0;
 		if (VulkanContext* context = m_Vulkan.TryGetMainContext())
-		{
-			if (context->IsGameThread())
-				entry.Slot = context->GetCurrentFrameSlot();
-		}
+			entry.Slot = context->GetCurrentFrameSlot();
 		entry.ResetTag = m_SlotResetCount[entry.Slot].load(std::memory_order_relaxed) + kRetireResetDistance;
 		m_RetireQueue.push_back(std::move(entry));
+	}
+
+	void VulkanRhiDevice::AssertRetireQueueOwner(const char* entryPoint) const
+	{
+		(void)entryPoint;
+		TE_CORE_ASSERT(m_Vulkan.IsGameThread(), std::string("VulkanRhiDevice::") + entryPoint + " off the game thread - the retire queue is game-thread-owned; a GPU object's last Ref must drop on the game thread");
+	}
+
+	size_t VulkanRhiDevice::GetRetireQueueSize() const
+	{
+		AssertRetireQueueOwner("GetRetireQueueSize");
+		return m_RetireQueue.size();
 	}
 
 	void VulkanRhiDevice::NoteSlotReset(uint32_t slot)
@@ -1540,6 +1550,7 @@ namespace rhi {
 
 	void VulkanRhiDevice::DrainRetireQueue()
 	{
+		AssertRetireQueueOwner("DrainRetireQueue");
 		if (m_RetireQueue.empty())
 			return;
 
@@ -1563,6 +1574,7 @@ namespace rhi {
 
 	void VulkanRhiDevice::DrainRetireQueueUnconditional()
 	{
+		AssertRetireQueueOwner("DrainRetireQueueUnconditional");
 		for (const RetireEntry& entry : m_RetireQueue)
 			FreeRetireEntry(entry);
 		m_RetireQueue.clear();

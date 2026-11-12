@@ -192,8 +192,14 @@ namespace rhi {
 		void QueueShaderForDestruction(VkShaderModule shader);
 		void QueueSamplerForDestruction(VkSampler sampler);
 
-		// Frees every entry whose stamp the GPU has passed (called once
-		// per frame after submit). Shutdown drains unconditionally instead.
+		// Frees every entry whose slot's record-start resets reached its tag
+		// (called once per frame by SwapBuffers, after the enqueue, and by the
+		// 2D retire self-test - both on the game thread). Shutdown drains
+		// unconditionally instead. The retire queue is game-thread-owned -
+		// QueueRetire (the choke point every Queue*ForDestruction / Destroy* /
+		// GPU-object destructor reaches) and both drains assert
+		// VulkanDevice::IsGameThread(). Only NoteSlotReset crosses threads,
+		// through the atomic reset counts.
 		void DrainRetireQueue();
 		void DrainRetireQueueUnconditional();
 
@@ -210,7 +216,7 @@ namespace rhi {
 		// Dev/test accessor: the retire queue's current depth (the S-C
 		// buffer-retire self-test asserts the mesh destruction path queues
 		// instead of destroying synchronously).
-		size_t GetRetireQueueSize() const { return m_RetireQueue.size(); }
+		size_t GetRetireQueueSize() const;
 		size_t GetPipelineCacheSize() const { return m_PipelineCache.size(); }
 		// The reload no-op guard compares the re-read SPIR-V against
 		// the shader's current module (nullptr when absent).
@@ -371,6 +377,9 @@ namespace rhi {
 		};
 		void QueueRetire(RetireEntry&& entry);
 		void FreeRetireEntry(const RetireEntry& entry);
+		// The dev assert every retire-queue access goes through (the game
+		// thread is its one owner).
+		void AssertRetireQueueOwner(const char* entryPoint) const;
 
 		// The generation-checked handle table: fixed-slot objects + a
 		// freelist; a freed slot bumps its generation. Deferred destruction
@@ -607,6 +616,7 @@ namespace rhi {
 		std::vector<std::pair<uint32_t, uint64_t>> m_PendingBufferIndexReuse;
 		std::vector<uint32_t> m_FreeBindlessBufferIndices;
 		uint32_t m_NextBindlessBufferIndex = 0;
+		// Game-thread-owned, unlocked by design (AssertRetireQueueOwner).
 		std::vector<RetireEntry> m_RetireQueue;
 		// The per-slot record-start reset counts (the submit thread's
 		// NoteSlotReset bumps them after the command buffers free) - the
