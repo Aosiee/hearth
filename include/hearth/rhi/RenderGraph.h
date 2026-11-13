@@ -15,6 +15,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <algorithm>
 #include <vector>
 
 namespace TinyEngine {
@@ -179,6 +180,13 @@ namespace rg {
 		};
 		const std::vector<CompiledPass>& GetCompiledPasses() const { return m_CompiledPasses; }
 		const std::vector<CompiledBarrier>& GetCompiledBarriers() const { return m_CompiledBarriers; }
+		// The compiled ordering edges, by registration index: true when
+		// pass `later` must run after pass `earlier` (tests + diagnostics).
+		bool DependsOn(uint32_t later, uint32_t earlier) const
+		{
+			return earlier < m_Dependents.size()
+				&& std::find(m_Dependents[earlier].begin(), m_Dependents[earlier].end(), later) != m_Dependents[earlier].end();
+		}
 
 		// The state each texture is in after the last ordered access (its
 		// initial state if never accessed) - the frame-end carry writes
@@ -220,6 +228,7 @@ namespace rg {
 		std::vector<uint32_t> m_Order;
 		std::vector<CompiledPass> m_CompiledPasses;
 		std::vector<CompiledBarrier> m_CompiledBarriers;
+		std::vector<std::vector<uint32_t>> m_Dependents;
 		// The per-pass barrier ranges into m_CompiledBarriers (which is
 		// appended in ascending OrderIndex order): m_PassBarrierBegin[i] is
 		// the first barrier of compiled pass i, [i+1] the exclusive end.

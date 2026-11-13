@@ -166,6 +166,52 @@ namespace rg_tests {
 		CHECK(NameAt(graph, 1) == "Present");
 	}
 
+	TEST_CASE("rendergraph: a write after a read is ordered after it (two targets share one atlas)")
+	{
+		// Target A's lighting samples the shared shadow atlas; target B's
+		// cascade pass then clears and rewrites it. The WAR edge (not just
+		// the registration-order tie-break) orders B's cascades after A's
+		// lighting, with the DepthRead -> DepthWrite barrier on B's pass.
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture atlas = graph.Import(ImportHandle(1), rhi::TextureState::DepthRead);
+		rg::RGTexture colourA = graph.Import(ImportHandle(2), rhi::TextureState::Undefined);
+		rg::RGTexture colourB = graph.Import(ImportHandle(3), rhi::TextureState::Undefined);
+
+		auto& cascadesA = graph.AddPass("A Cascades");
+		cascadesA.Write(atlas, rhi::TextureState::DepthWrite);
+		cascadesA.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+		auto& lightingA = graph.AddPass("A Lighting");
+		lightingA.Read(atlas, rhi::TextureState::DepthRead);
+		lightingA.Write(colourA, rhi::TextureState::RenderTarget);
+		lightingA.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+		auto& cascadesB = graph.AddPass("B Cascades");
+		cascadesB.Write(atlas, rhi::TextureState::DepthWrite);
+		cascadesB.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+		auto& lightingB = graph.AddPass("B Lighting");
+		lightingB.Read(atlas, rhi::TextureState::DepthRead);
+		lightingB.Write(colourB, rhi::TextureState::RenderTarget);
+		lightingB.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+
+		REQUIRE(graph.GetCompiledPasses().size() == 4);
+		CHECK(NameAt(graph, 0) == "A Cascades");
+		CHECK(NameAt(graph, 1) == "A Lighting");
+		CHECK(NameAt(graph, 2) == "B Cascades");
+		CHECK(NameAt(graph, 3) == "B Lighting");
+		CHECK(graph.DependsOn(2, 1)); // the WAR edge: B's cascades after A's lighting
+		CHECK(graph.DependsOn(1, 0)); // RAW
+		CHECK(graph.DependsOn(3, 2)); // RAW
+		CHECK(!graph.DependsOn(1, 2));
+
+		bool war = false;
+		for (const auto& barrier : graph.GetCompiledBarriers())
+			if (barrier.PassName == "B Cascades" && barrier.From == rhi::TextureState::DepthRead && barrier.To == rhi::TextureState::DepthWrite)
+				war = true;
+		CHECK(war);
+	}
+
 	TEST_CASE("rendergraph: independent passes keep registration order")
 	{
 		rg::TransientTexturePool pool;

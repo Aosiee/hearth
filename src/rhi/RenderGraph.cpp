@@ -234,8 +234,28 @@ namespace rg {
 						}
 					}
 				}
+				// WAR - the NEXT writer of a texture this pass reads runs after
+				// it (target A's lighting samples the shared shadow atlas
+				// before target B's cascade pass clears it). Every edge
+				// still points forward, so the stable sort's order is
+				// unchanged; the edge makes it a dependency, not a tie-break.
+				for (uint32_t j = i + 1; j < m_Passes.size(); j++)
+				{
+					if (!m_Passes[j].Live)
+						continue;
+					bool writes = false;
+					for (const AccessRecord& later : m_Passes[j].Accesses)
+						if (later.Write && later.Texture == access.Texture) { writes = true; break; }
+					if (writes)
+					{
+						dependents[i].push_back(j);
+						inDegree[j]++;
+						break;
+					}
+				}
 			}
 		}
+		m_Dependents = dependents;
 
 		std::vector<uint32_t> ready;
 		for (uint32_t i = 0; i < m_Passes.size(); i++)
