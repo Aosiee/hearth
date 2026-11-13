@@ -67,11 +67,12 @@ namespace TinyEngine {
 		// allocated or released). Game-thread-only, like the allocation.
 		const std::array<VulkanContext*, MaxWindowSlots>& GetLiveWindowContexts() const { return m_WindowContexts; }
 
-		// The main window's context: the slot-0 window's. Owned here,
-		// beside the window-slot table (formerly the file-scope
-		// s_MainVulkanContext). Set exactly once, by the slot-0 context's
-		// Init (a secondary window never sets it); cleared by that context's
-		// destructor. The clear is deliberately LATER than
+		// The main window's context, owned here, beside the window-slot
+		// table (formerly the file-scope s_MainVulkanContext). Set exactly
+		// once, by the Init of the context created with
+		// WindowProps::IsMainWindow (the flag, whatever window slot it
+		// holds; a secondary window never sets it); cleared by that
+		// context's destructor. The clear is deliberately LATER than
 		// ReleaseWindowSlot's table entry: the main context's own teardown
 		// joins its submit thread, whose last record still reads the main
 		// context. Written on the game thread between frames; read on the

@@ -1,5 +1,6 @@
 #include "tepch.h"
 #include "Platform/Vulkan/VulkanDevice.h"
+#include "Platform/Vulkan/VulkanContext.h" // SetMainContext asserts the context's flag
 #include "TinyEngine/Debug/GpuFrameDebugData.h"
 #include "TinyEngine/Debug/Profiler.h"
 #include "TinyEngine/Core/CrashHandler.h"
@@ -764,10 +765,15 @@ namespace TinyEngine {
 
 	void VulkanDevice::SetMainContext(VulkanContext* context)
 	{
-		// M-B: set-once - a second set (e.g. a secondary window claiming the
-		// main context) is a defect, not a silent overwrite.
-		TE_CORE_ASSERT(m_MainContext == nullptr, "SetMainContext called twice - the main context is set exactly once (slot 0)");
-		TE_CORE_ASSERT(context != nullptr && m_WindowContexts[0] == context, "SetMainContext from a context that does not own window slot 0");
+		// Set-once - a second set (e.g. a secondary window claiming the main
+		// context, or a main window created twice) is a defect, not a silent
+		// overwrite. The context must be the one created with
+		// WindowProps::IsMainWindow (not "owns window slot 0") and live in
+		// the window-slot table (it allocated its slot first).
+		TE_CORE_ASSERT(m_MainContext == nullptr, "SetMainContext called twice - the main context is set exactly once");
+		TE_CORE_ASSERT(context != nullptr && context->IsMainWindow(), "SetMainContext from a context not created as the main window (WindowProps::IsMainWindow)");
+		TE_CORE_ASSERT(std::find(m_WindowContexts.begin(), m_WindowContexts.end(), context) != m_WindowContexts.end(),
+			"SetMainContext from a context that holds no live window slot (it must allocate its slot first)");
 		m_MainContext = context;
 	}
 
@@ -779,7 +785,7 @@ namespace TinyEngine {
 
 	VulkanContext& VulkanDevice::GetMainContext() const
 	{
-		TE_CORE_ASSERT(m_MainContext != nullptr, "GetMainContext() with no main context - the slot-0 window's context must exist in windowed flavors");
+		TE_CORE_ASSERT(m_MainContext != nullptr, "GetMainContext() with no main context - the main window's context must exist in windowed flavors");
 		return *m_MainContext;
 	}
 
@@ -1162,7 +1168,10 @@ namespace TinyEngine {
 #if !defined(TE_CONF_DIST)
 		if (isMainWindow)
 		{
-			debugInfo.FrameInFlightIndex = frameIndex;
+			// The panel's "In-Flight Index" is the window's frame-in-flight
+			// index, not the full slot (they were equal only while the main
+			// window held slot base 0).
+			debugInfo.FrameInFlightIndex = frameIndex % FramesInFlight;
 			debugInfo.Barriers.clear();
 
 			// Fold the live VMA heap budgets into the debugger
