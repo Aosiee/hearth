@@ -1,5 +1,6 @@
 #include "tepch.h"
 #include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
+#include "Platform/Vulkan/RHI/DescriptorLogUtil.h"
 #include "Platform/Vulkan/RHI/PipelineCacheFile.h"
 #include "Platform/Vulkan/VulkanContext.h" // the main context's GetCurrentFrameSlot (the retire queue's slot tag)
 
@@ -1003,16 +1004,10 @@ namespace rhi {
 			index = m_FreeBindlessIndices.back();
 			m_FreeBindlessIndices.pop_back();
 
-			// A recycled index's old entries (its tombstone, and anything
-			// else) are superseded by the new owner's write - drop them so
-			// the log stays bounded per index.
-			for (auto it = m_DescriptorWriteLog.begin(); it != m_DescriptorWriteLog.end();)
-			{
-				if (it->Index == index)
-					it = m_DescriptorWriteLog.erase(it);
-				else
-					++it;
-			}
+			// A recycled index's old texture entries (its tombstone, and
+			// anything else) are superseded by the new owner's write - the
+			// buffer binding's entries at the same number stay.
+			DropSupersededEntries(m_DescriptorWriteLog, index, 0);
 		}
 		else
 		{
@@ -1051,16 +1046,9 @@ namespace rhi {
 			index = m_FreeBindlessBufferIndices.back();
 			m_FreeBindlessBufferIndices.pop_back();
 
-			// A recycled index's old entries (its tombstone, and anything
-			// else) are superseded by the new owner's write - drop them so
-			// the log stays bounded per index (the texture-side precedent).
-			for (auto it = m_DescriptorWriteLog.begin(); it != m_DescriptorWriteLog.end();)
-			{
-				if (it->Index == index && it->Binding == 1)
-					it = m_DescriptorWriteLog.erase(it);
-				else
-					++it;
-			}
+			// A recycled index's old buffer entries are superseded by the
+			// new owner's write (the texture binding's stay).
+			DropSupersededEntries(m_DescriptorWriteLog, index, 1);
 		}
 		else
 		{
