@@ -1174,13 +1174,19 @@ namespace TinyEngine {
 			debugInfo.FrameInFlightIndex = frameIndex % FramesInFlight;
 			debugInfo.Barriers.clear();
 
-			// Fold the live VMA heap budgets into the debugger
-			// snapshot (the caller holds the fence, so the allocator's
-			// counters are quiesced for this frame slot).
-			VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+			// Fold the live VMA heap budgets into the debugger snapshot
+			// (the caller holds the fence, so the allocator's counters are
+			// quiesced for this frame slot).
+			// vmaGetHeapBudgets writes the device's heaps only; the rest of
+			// the array was uninitialised stack the panels showed as
+			// 133507876 MiB heaps.
+			VmaBudget budgets[VK_MAX_MEMORY_HEAPS] = {};
 			vmaGetHeapBudgets(m_Allocator, budgets);
+			const VkPhysicalDeviceMemoryProperties* memoryProperties = nullptr;
+			vmaGetMemoryProperties(m_Allocator, &memoryProperties);
+			const uint32_t heapCount = memoryProperties ? std::min<uint32_t>(memoryProperties->memoryHeapCount, VK_MAX_MEMORY_HEAPS) : 0;
 			debugInfo.HeapBudgetCount = 0;
-			for (uint32_t heap = 0; heap < VK_MAX_MEMORY_HEAPS; heap++)
+			for (uint32_t heap = 0; heap < heapCount; heap++)
 			{
 				if (budgets[heap].budget == 0 && budgets[heap].usage == 0)
 					continue;
