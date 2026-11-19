@@ -14,11 +14,15 @@
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
 // The vendored header is not warning-clean under -Wall -Wextra
-// (silenced here - one site covers every Vulkan TU).
+// (silenced here - one site covers every Vulkan TU). Clang also
+// reports its partial _Nullable/_Nonnull annotations and an unused
+// placeholder member.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #pragma GCC diagnostic ignored "-Wunused-variable"
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#pragma clang diagnostic ignored "-Wnullability-completeness"
+#pragma GCC diagnostic ignored "-Wunused-private-field"
 #include <vk_mem_alloc.h>
 #pragma GCC diagnostic pop
 
