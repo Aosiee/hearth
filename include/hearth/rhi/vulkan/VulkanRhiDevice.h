@@ -268,6 +268,7 @@ namespace rhi {
 
 		ShaderHandle CreateShader(std::span<const uint32_t> spirv, ShaderStage stage, const char* debugName, const ShaderIdentity* identity = nullptr) override;
 		void DestroyShader(ShaderHandle handle) override;
+		ShaderReloadResult ReloadShader(std::string_view name, std::span<const uint32_t> spirv) override;
 
 		PipelineHandle CreatePipeline(const PipelineStateDesc& desc, const char* debugName) override;
 		void DestroyPipeline(PipelineHandle handle) override;
@@ -550,6 +551,9 @@ namespace rhi {
 		{
 			PipelineHandle Handle;
 			uint32_t RefCount = 0;
+			// What a shader reload rebuilds it from.
+			VulkanPipelineSpec Spec;
+			std::string Name;
 		};
 		struct PipelineCacheKey
 		{

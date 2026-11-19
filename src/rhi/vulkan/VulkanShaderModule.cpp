@@ -6,6 +6,7 @@ namespace TinyEngine {
 	void VulkanShaderModule::Init(VulkanDevice& device, const std::vector<uint32_t>& spirv, VkShaderStageFlagBits stage, const std::string& debugName)
 	{
 		m_SpirV = spirv;
+		m_Name = debugName;
 
 		m_Device = &device;
 		m_Stage = stage;

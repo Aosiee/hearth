@@ -13,6 +13,8 @@
 
 #include <cstdint>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace TinyEngine {
@@ -153,6 +155,22 @@ namespace rhi {
 
 		virtual ShaderHandle CreateShader(std::span<const uint32_t> spirv, ShaderStage stage, const char* debugName, const ShaderIdentity* identity = nullptr) = 0;
 		virtual void DestroyShader(ShaderHandle handle) = 0;
+
+		// Every live shader created with
+		// `name` as its debug name (its source file name, "post.frag") takes
+		// `spirv` in place, and every cached pipeline baking one is rebuilt
+		// in place - every shader and pipeline handle stays valid. Identical
+		// SPIR-V is a no-op; a changed push-constant block or sampler binding
+		// is refused (the CPU side would have to change with it). Callers
+		// hold the renderer idle (the hot-reload park).
+		struct ShaderReloadResult
+		{
+			uint32_t Matched = 0;   // live shaders with the name
+			uint32_t Shaders = 0;   // reloaded (0 with Matched > 0 = identical SPIR-V, or refused)
+			uint32_t Pipelines = 0; // rebuilt
+			std::string Refusal;    // why nothing changed ("" = not refused)
+		};
+		virtual ShaderReloadResult ReloadShader(std::string_view name, std::span<const uint32_t> spirv) = 0;
 
 		// Destroys + evicts every cached pipeline that references
 		// a shader loaded from `shaderAsset` (shader hot reload calls this

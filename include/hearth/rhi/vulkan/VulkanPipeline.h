@@ -102,6 +102,14 @@ namespace TinyEngine {
 		VkPipeline GetHandle() const { return m_Pipeline; }
 		VkPipelineLayout GetLayout() const { return m_Layout; }
 
+		// The in-place rebuild's swap (`other` is left holding the old
+		// objects for the retire queue).
+		void SwapContents(VulkanPipeline& other)
+		{
+			std::swap(m_Pipeline, other.m_Pipeline);
+			std::swap(m_Layout, other.m_Layout);
+		}
+
 	private:
 		VulkanDevice* m_Device = nullptr;
 		VkPipelineLayout m_Layout = VK_NULL_HANDLE;

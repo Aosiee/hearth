@@ -2,6 +2,7 @@
 #include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
 #include "Platform/Vulkan/RHI/DescriptorLogUtil.h"
 #include "Platform/Vulkan/RHI/PipelineCacheFile.h"
+#include "Platform/Vulkan/VulkanShaderReflection.h"
 #include "Platform/Vulkan/VulkanContext.h" // the main context's GetCurrentFrameSlot (the retire queue's slot tag)
 
 #include "TinyEngine/Core/Log.h"
@@ -1868,6 +1869,101 @@ namespace rhi {
 		return handle;
 	}
 
+	Device::ShaderReloadResult VulkanRhiDevice::ReloadShader(std::string_view name, std::span<const uint32_t> spirv)
+	{
+		TE_CORE_ASSERT(m_Initialized, "RHI shader reloaded before the device");
+		ShaderReloadResult result;
+		const std::vector<uint32_t> code(spirv.begin(), spirv.end());
+
+		std::vector<VulkanShaderModule*> changed;
+		{
+			std::shared_lock lock(m_Shaders.Mutex);
+			for (auto& slot : m_Shaders.Slots)
+			{
+				if (!slot.Alive || !slot.Object || slot.Object->GetName() != name)
+					continue;
+				result.Matched++;
+				if (slot.Object->GetSpirV() != code) // the daemon re-broadcasts every asset per build
+					changed.push_back(slot.Object.get());
+			}
+		}
+		if (changed.empty())
+			return result;
+
+		// The CPU side builds the push block and binds the bindless array:
+		// a shader that changed either needs that code changed too.
+		const VulkanShaderReflectionInfo fresh = VulkanShaderReflection::Reflect(code);
+		for (VulkanShaderModule* shader : changed)
+		{
+			const VulkanShaderReflectionInfo old = VulkanShaderReflection::Reflect(shader->GetSpirV());
+			if (old.PushConstantSize != fresh.PushConstantSize)
+			{
+				result.Refusal = "its push-constant block changed (" + std::to_string(old.PushConstantSize) + " -> " +
+				                 std::to_string(fresh.PushConstantSize) + " bytes)";
+				return result;
+			}
+			if (old.HasCombinedImageSampler != fresh.HasCombinedImageSampler ||
+			    (old.HasCombinedImageSampler && old.CombinedImageSamplerBinding != fresh.CombinedImageSamplerBinding))
+			{
+				result.Refusal = "its sampler binding changed";
+				return result;
+			}
+		}
+
+		// The new modules, then every cached pipeline baking a changed shader
+		// rebuilt from its spec with them - nothing is swapped until all exist.
+		std::vector<std::unique_ptr<VulkanShaderModule>> modules;
+		std::unordered_map<const VulkanShaderModule*, VulkanShaderModule*> fresher;
+		for (VulkanShaderModule* shader : changed)
+		{
+			auto module = std::make_unique<VulkanShaderModule>();
+			module->Init(m_Vulkan, code, shader->GetStage(), std::string(name));
+			fresher[shader] = module.get();
+			modules.push_back(std::move(module));
+		}
+		struct Rebuilt
+		{
+			PipelineHandle Handle;
+			VulkanPipeline Pipeline;
+		};
+		std::vector<Rebuilt> rebuilt;
+		for (const auto& [key, entry] : m_PipelineCache)
+		{
+			auto vs = fresher.find(entry.Spec.VertexShader);
+			auto fs = fresher.find(entry.Spec.FragmentShader);
+			if (vs == fresher.end() && fs == fresher.end())
+				continue;
+			VulkanPipelineSpec spec = entry.Spec;
+			if (vs != fresher.end())
+				spec.VertexShader = vs->second;
+			if (fs != fresher.end())
+				spec.FragmentShader = fs->second;
+			Rebuilt r;
+			r.Handle = entry.Handle;
+			r.Pipeline.Init(m_Vulkan, spec, entry.Name, m_VkPipelineCache);
+			rebuilt.push_back(std::move(r));
+		}
+
+		// The swap: each slot takes its new object, the old ones retire (the
+		// in-flight frames may still reference them). The cache entries' specs
+		// keep pointing at the slot objects, which now hold the new modules.
+		for (size_t i = 0; i < changed.size(); i++)
+		{
+			changed[i]->SwapContents(*modules[i]);
+			QueueShaderForDestruction(modules[i]->GetHandle());
+		}
+		for (Rebuilt& r : rebuilt)
+		{
+			VulkanPipeline* pipeline = m_Pipelines.Get(r.Handle);
+			TE_CORE_ASSERT(pipeline, "a cached pipeline without its slot");
+			pipeline->SwapContents(r.Pipeline);
+			QueuePipelineForDestruction(r.Pipeline.GetHandle(), r.Pipeline.GetLayout());
+		}
+		result.Shaders = (uint32_t)changed.size();
+		result.Pipelines = (uint32_t)rebuilt.size();
+		return result;
+	}
+
 	void VulkanRhiDevice::DestroyShader(ShaderHandle handle)
 	{
 		// Pipelines bake the shader modules in - evict every cached
@@ -1996,7 +2092,9 @@ namespace rhi {
 		PipelineCacheEntry entry;
 		entry.Handle = handle;
 		entry.RefCount = 1;
-		m_PipelineCache.emplace(key, entry);
+		entry.Spec = spec;
+		entry.Name = debugName ? debugName : "";
+		m_PipelineCache.emplace(key, std::move(entry));
 		return handle;
 	}
 
