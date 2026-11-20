@@ -5,7 +5,7 @@
 #include "TinyEngine/Debug/Profiler.h"
 #include "TinyEngine/Core/CrashHandler.h"
 
-#include "loom.h"
+#include "loom/loom.h"
 
 #include <GLFW/glfw3.h>
 #include <algorithm>

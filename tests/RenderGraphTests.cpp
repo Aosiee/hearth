@@ -6,7 +6,7 @@
 
 #include "TinyEngine/RenderGraph/RenderGraph.h"
 
-#include "loom.h"
+#include "loom/loom.h"
 
 #include <doctest/doctest.h>
 
