@@ -2,12 +2,12 @@
 #include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
 #include "Platform/Vulkan/RHI/DescriptorLogUtil.h"
 #include "Platform/Vulkan/RHI/PipelineCacheFile.h"
-#include "Platform/Vulkan/VulkanShaderReflection.h"
-#include "Platform/Vulkan/VulkanContext.h" // the main context's GetCurrentFrameSlot (the retire queue's slot tag)
+#include "Platform/Vulkan/Shaders/VulkanShaderReflection.h"
+#include "Platform/Vulkan/Device/VulkanContext.h" // the main context's GetCurrentFrameSlot (the retire queue's slot tag)
 
 #include "TinyEngine/Core/Log.h"
 #include "TinyEngine/Core/Application.h"
-#include "TinyEngine/Core/RhiDevice.h"
+#include "TinyEngine/RHI/RhiDevice.h"
 #include "TinyEngine/CVar/EngineCVars.h"
 #include <blake3.h>
 

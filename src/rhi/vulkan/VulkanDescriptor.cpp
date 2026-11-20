@@ -1,5 +1,5 @@
 #include "tepch.h"
-#include "Platform/Vulkan/VulkanDescriptor.h"
+#include "Platform/Vulkan/Resources/VulkanDescriptor.h"
 
 namespace TinyEngine {
 

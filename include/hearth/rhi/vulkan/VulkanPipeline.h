@@ -1,8 +1,8 @@
 #pragma once
 
 #include "Platform/Vulkan/VulkanCommon.h"
-#include "Platform/Vulkan/VulkanDevice.h"
-#include "Platform/Vulkan/VulkanShaderModule.h"
+#include "Platform/Vulkan/Device/VulkanDevice.h"
+#include "Platform/Vulkan/Shaders/VulkanShaderModule.h"
 
 namespace TinyEngine {
 

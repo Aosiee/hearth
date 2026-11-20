@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Platform/Vulkan/VulkanCommon.h"
-#include "Platform/Vulkan/VulkanDevice.h"
+#include "Platform/Vulkan/Device/VulkanDevice.h"
 #include "TinyEngine/RHI/Types.h"
 
 namespace TinyEngine {

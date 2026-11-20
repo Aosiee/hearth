@@ -1,7 +1,7 @@
 #pragma once
 
-#include "TinyEngine/Debug/Profiler.h"
-#include "TinyEngine/Debug/GpuFrameDebugData.h"
+#include "TinyEngine/Profiler/Profiler.h"
+#include "TinyEngine/Profiler/GpuFrameDebugData.h"
 
 #include "Platform/Vulkan/VulkanCommon.h"
 

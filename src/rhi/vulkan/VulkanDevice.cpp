@@ -1,9 +1,9 @@
 #include "tepch.h"
-#include "Platform/Vulkan/VulkanDevice.h"
-#include "Platform/Vulkan/VulkanContext.h" // SetMainContext asserts the context's flag
-#include "TinyEngine/Debug/GpuFrameDebugData.h"
-#include "TinyEngine/Debug/Profiler.h"
-#include "TinyEngine/Core/CrashHandler.h"
+#include "Platform/Vulkan/Device/VulkanDevice.h"
+#include "Platform/Vulkan/Device/VulkanContext.h" // SetMainContext asserts the context's flag
+#include "TinyEngine/Profiler/GpuFrameDebugData.h"
+#include "TinyEngine/Profiler/Profiler.h"
+#include "TinyEngine/Core/Crash/CrashHandler.h"
 
 #include "loom/loom.h"
 

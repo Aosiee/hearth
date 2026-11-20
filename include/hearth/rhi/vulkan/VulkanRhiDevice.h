@@ -9,12 +9,12 @@
 #include "TinyEngine/RHI/RHI.h"
 
 #include "Platform/Vulkan/VulkanCommon.h"
-#include "Platform/Vulkan/VulkanDevice.h"
-#include "Platform/Vulkan/VulkanBuffer.h"
-#include "Platform/Vulkan/VulkanTexture.h"
-#include "Platform/Vulkan/VulkanPipeline.h"
-#include "Platform/Vulkan/VulkanShaderModule.h"
-#include "Platform/Vulkan/VulkanSwapchain.h"
+#include "Platform/Vulkan/Device/VulkanDevice.h"
+#include "Platform/Vulkan/Resources/VulkanBuffer.h"
+#include "Platform/Vulkan/Resources/VulkanTexture.h"
+#include "Platform/Vulkan/Shaders/VulkanPipeline.h"
+#include "Platform/Vulkan/Shaders/VulkanShaderModule.h"
+#include "Platform/Vulkan/Device/VulkanSwapchain.h"
 
 #include <memory>
 #include <mutex>

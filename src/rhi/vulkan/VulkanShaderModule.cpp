@@ -1,5 +1,5 @@
 #include "tepch.h"
-#include "Platform/Vulkan/VulkanShaderModule.h"
+#include "Platform/Vulkan/Shaders/VulkanShaderModule.h"
 
 namespace TinyEngine {
 

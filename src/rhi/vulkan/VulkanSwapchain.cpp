@@ -1,5 +1,5 @@
 #include "tepch.h"
-#include "Platform/Vulkan/VulkanSwapchain.h"
+#include "Platform/Vulkan/Device/VulkanSwapchain.h"
 
 #include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
 
