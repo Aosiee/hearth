@@ -415,6 +415,7 @@ namespace TinyEngine {
 		m_DeviceName = properties.deviceName;
 		m_DriverVersion = properties.driverVersion;
 		m_ApiVersion = properties.apiVersion;
+		m_VendorId = properties.vendorID;
 		// The GPU in every crash report.
 		char driver[16];
 		std::snprintf(driver, sizeof(driver), "0x%08x", properties.driverVersion);

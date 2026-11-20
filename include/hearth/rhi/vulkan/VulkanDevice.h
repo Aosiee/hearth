@@ -363,6 +363,7 @@ namespace TinyEngine {
 		std::string m_DeviceName;
 		uint32_t m_DriverVersion = 0;
 		uint32_t m_ApiVersion = 0;
+		uint32_t m_VendorId = 0;
 	public:
 		float GetTimestampPeriodNs() const { return m_TimestampPeriodNs; }
 		uint32_t GetMaxPushConstantsSize() const { return m_MaxPushConstantsSize; }
@@ -371,6 +372,7 @@ namespace TinyEngine {
 		const std::string& GetDeviceName() const { return m_DeviceName; }
 		uint32_t GetDriverVersion() const { return m_DriverVersion; }
 		uint32_t GetApiVersion() const { return m_ApiVersion; }
+		uint32_t GetVendorId() const { return m_VendorId; }
 		uint32_t GetRecordThreadCount() const { return m_RecordThreadCount; }
 	private:
 
