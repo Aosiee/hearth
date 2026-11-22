@@ -1,7 +1,9 @@
 #pragma once
 
 // The RenderGraph core. Backend-neutral and headless-safe: passes declare
-// reads/writes of virtual resources with their access state; Compile
+// reads/writes of virtual resources (textures and buffers) with their access
+// state; a pass's ExecuteFn records whatever it needs (a draw inside its own
+// BeginRendering, a compute dispatch, a copy). Compile
 // produces a topological order, culls passes whose outputs are never
 // consumed, derives the minimal barrier set between consecutive users, and
 // Execute replays the plan on a CommandList. v1: single-threaded Execute,
@@ -31,9 +33,36 @@ namespace rg {
 		bool operator==(const RGTexture& other) const { return Index == other.Index; }
 	};
 
+	// An imported buffer (a compute pass's output, a vertex stream a draw
+	// reads). Buffers are imported only: the graph orders and fences them, it
+	// does not allocate them.
+	struct RGBuffer
+	{
+		uint32_t Index = ~0u;
+		bool Valid() const { return Index != ~0u; }
+		bool operator==(const RGBuffer& other) const { return Index == other.Index; }
+	};
+
 	// The concrete resources one pass reads/writes, resolved at Execute.
 	struct PassResources
 	{
+		struct BufferRef
+		{
+			RGBuffer Virtual;
+			BufferHandle Handle;
+		};
+		std::vector<BufferRef> Buffers;
+
+		BufferHandle GetBuffer(RGBuffer virtualBuffer) const
+		{
+			for (const BufferRef& ref : Buffers)
+			{
+				if (ref.Virtual == virtualBuffer)
+					return ref.Handle;
+			}
+			return {};
+		}
+
 		struct TextureRef
 		{
 			RGTexture Virtual;
@@ -107,6 +136,10 @@ namespace rg {
 		// A transient resource, pooled across frames by its virtual index.
 		RGTexture CreateTexture(const TextureDesc& desc);
 
+		// An external buffer, tracked from `currentState` like an imported
+		// texture (a write to it keeps its pass live).
+		RGBuffer ImportBuffer(BufferHandle handle, BufferState currentState);
+
 		class PassBuilder
 		{
 		public:
@@ -115,6 +148,8 @@ namespace rg {
 			// from -> to barriers against the previous user's state.
 			RGTexture Read(RGTexture texture, TextureState state);
 			RGTexture Write(RGTexture texture, TextureState state);
+			RGBuffer Read(RGBuffer buffer, BufferState state);
+			RGBuffer Write(RGBuffer buffer, BufferState state);
 			void SetExecute(std::function<void(CommandList&, const PassResources&)> fn);
 
 		private:
@@ -174,9 +209,18 @@ namespace rg {
 			// editor registers same-named passes per framebuffer target, so
 			// the name is not unique; RecordPass keys on this).
 			uint32_t OrderIndex = 0;
+			// A texture barrier (TextureIndex, From, To) or, with IsBuffer, a
+			// buffer one (BufferIndex, BufferFrom, BufferTo).
+			bool IsBuffer = false;
 			uint32_t TextureIndex = 0;
 			TextureState From = TextureState::Undefined;
 			TextureState To = TextureState::Undefined;
+			uint32_t BufferIndex = 0;
+			BufferState BufferFrom = BufferState::Undefined;
+			BufferState BufferTo = BufferState::Undefined;
+
+			const char* FromName() const { return IsBuffer ? BufferStateName(BufferFrom) : TextureStateName(From); }
+			const char* ToName() const { return IsBuffer ? BufferStateName(BufferTo) : TextureStateName(To); }
 		};
 		const std::vector<CompiledPass>& GetCompiledPasses() const { return m_CompiledPasses; }
 		const std::vector<CompiledBarrier>& GetCompiledBarriers() const { return m_CompiledBarriers; }
@@ -193,14 +237,30 @@ namespace rg {
 		// these back to the external trackers so the next frame's Imports
 		// seed correctly.
 		TextureState GetFinalState(RGTexture texture) const;
+		BufferState GetFinalState(RGBuffer buffer) const;
 
 	private:
+		// One access to a texture or (IsBuffer) a buffer - index into
+		// m_Textures or m_Buffers. Culling, ordering and the barrier walk
+		// treat both kinds alike.
 		struct AccessRecord
 		{
-			RGTexture Texture;
+			bool IsBuffer = false;
+			uint32_t Index = ~0u;
 			TextureState State = TextureState::Undefined;
+			BufferState BufState = BufferState::Undefined;
 			bool Write = false;
+
+			bool SameResource(const AccessRecord& other) const { return IsBuffer == other.IsBuffer && Index == other.Index; }
 		};
+
+		struct VirtualBuffer
+		{
+			BufferHandle Handle;
+			BufferState State = BufferState::Undefined;
+		};
+
+		bool IsImported(const AccessRecord& access) const { return access.IsBuffer || m_Textures[access.Index].Imported; }
 
 		struct Pass
 		{
@@ -224,6 +284,7 @@ namespace rg {
 		uint32_t m_GraphId = 0;
 		std::vector<Pass> m_Passes;
 		std::vector<VirtualTexture> m_Textures;
+		std::vector<VirtualBuffer> m_Buffers;
 		std::vector<std::unique_ptr<PassBuilder>> m_Builders;
 		std::vector<uint32_t> m_Order;
 		std::vector<CompiledPass> m_CompiledPasses;
@@ -234,6 +295,7 @@ namespace rg {
 		// the first barrier of compiled pass i, [i+1] the exclusive end.
 		std::vector<uint32_t> m_PassBarrierBegin;
 		std::vector<TextureState> m_FinalStates;
+		std::vector<BufferState> m_FinalBufferStates;
 	};
 
 } // namespace rg

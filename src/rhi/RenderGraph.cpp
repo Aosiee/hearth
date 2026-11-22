@@ -85,6 +85,15 @@ namespace rg {
 		return { (uint32_t)m_Textures.size() - 1 };
 	}
 
+	RGBuffer RenderGraph::ImportBuffer(BufferHandle handle, BufferState currentState)
+	{
+		VirtualBuffer buffer;
+		buffer.Handle = handle;
+		buffer.State = currentState;
+		m_Buffers.push_back(buffer);
+		return { (uint32_t)m_Buffers.size() - 1 };
+	}
+
 	RenderGraph::PassBuilder::PassBuilder(RenderGraph& graph, uint32_t passIndex)
 		: m_Graph(&graph), m_PassIndex(passIndex)
 	{
@@ -94,7 +103,7 @@ namespace rg {
 	{
 		TE_CORE_ASSERT(texture.Valid(), "reading an invalid virtual texture");
 		AccessRecord access;
-		access.Texture = texture;
+		access.Index = texture.Index;
 		access.State = state;
 		access.Write = false;
 		m_Graph->m_Passes[m_PassIndex].Accesses.push_back(access);
@@ -105,11 +114,35 @@ namespace rg {
 	{
 		TE_CORE_ASSERT(texture.Valid(), "writing an invalid virtual texture");
 		AccessRecord access;
-		access.Texture = texture;
+		access.Index = texture.Index;
 		access.State = state;
 		access.Write = true;
 		m_Graph->m_Passes[m_PassIndex].Accesses.push_back(access);
 		return texture;
+	}
+
+	RGBuffer RenderGraph::PassBuilder::Read(RGBuffer buffer, BufferState state)
+	{
+		TE_CORE_ASSERT(buffer.Valid(), "reading an invalid virtual buffer");
+		AccessRecord access;
+		access.IsBuffer = true;
+		access.Index = buffer.Index;
+		access.BufState = state;
+		access.Write = false;
+		m_Graph->m_Passes[m_PassIndex].Accesses.push_back(access);
+		return buffer;
+	}
+
+	RGBuffer RenderGraph::PassBuilder::Write(RGBuffer buffer, BufferState state)
+	{
+		TE_CORE_ASSERT(buffer.Valid(), "writing an invalid virtual buffer");
+		AccessRecord access;
+		access.IsBuffer = true;
+		access.Index = buffer.Index;
+		access.BufState = state;
+		access.Write = true;
+		m_Graph->m_Passes[m_PassIndex].Accesses.push_back(access);
+		return buffer;
 	}
 
 	void RenderGraph::PassBuilder::SetExecute(std::function<void(CommandList&, const PassResources&)> fn)
@@ -146,7 +179,7 @@ namespace rg {
 			bool writesImport = false;
 			for (const AccessRecord& access : m_Passes[i].Accesses)
 			{
-				if (access.Write && m_Textures[access.Texture.Index].Imported)
+				if (access.Write && IsImported(access))
 					writesImport = true;
 			}
 			if (writesImport || (m_Passes[i].Accesses.empty() && m_Passes[i].ExecuteFn))
@@ -174,7 +207,7 @@ namespace rg {
 						continue;
 					for (const AccessRecord& produced : m_Passes[i].Accesses)
 					{
-						if (produced.Write && produced.Texture == access.Texture)
+						if (produced.Write && produced.SameResource(access))
 						{
 							m_Passes[i].Live = true;
 							live.push_back(i);
@@ -211,7 +244,7 @@ namespace rg {
 							continue;
 						bool accessed = false;
 						for (const AccessRecord& later : m_Passes[j].Accesses)
-							if (later.Texture == access.Texture) { accessed = true; break; }
+							if (later.SameResource(access)) { accessed = true; break; }
 						if (accessed)
 						{
 							dependents[i].push_back(j);
@@ -227,7 +260,7 @@ namespace rg {
 						continue;
 					for (const AccessRecord& produced : m_Passes[j].Accesses)
 					{
-						if (produced.Write && produced.Texture == access.Texture)
+						if (produced.Write && produced.SameResource(access))
 						{
 							dependents[j].push_back(i);
 							inDegree[i]++;
@@ -245,7 +278,7 @@ namespace rg {
 						continue;
 					bool writes = false;
 					for (const AccessRecord& later : m_Passes[j].Accesses)
-						if (later.Write && later.Texture == access.Texture) { writes = true; break; }
+						if (later.Write && later.SameResource(access)) { writes = true; break; }
 					if (writes)
 					{
 						dependents[i].push_back(j);
@@ -287,13 +320,38 @@ namespace rg {
 		std::vector<bool> touched(m_Textures.size(), false);
 		for (uint32_t i = 0; i < m_Textures.size(); i++)
 			state[i] = m_Textures[i].State;
+		std::vector<BufferState> bufferState(m_Buffers.size());
+		std::vector<bool> bufferTouched(m_Buffers.size(), false);
+		for (uint32_t i = 0; i < m_Buffers.size(); i++)
+			bufferState[i] = m_Buffers[i].State;
 
 		for (uint32_t orderIndex = 0; orderIndex < m_Order.size(); orderIndex++)
 		{
 			Pass& pass = m_Passes[m_Order[orderIndex]];
 			for (const AccessRecord& access : pass.Accesses)
 			{
-				const uint32_t texIndex = access.Texture.Index;
+				if (access.IsBuffer)
+				{
+					// The texture rule below, for a buffer: a state change, or
+					// a write after an earlier access this frame (a compute
+					// write after a compute write still needs the dependency).
+					const BufferState before = bufferState[access.Index];
+					if (before != access.BufState || (access.Write && bufferTouched[access.Index]))
+					{
+						CompiledBarrier barrier;
+						barrier.PassName = pass.Name;
+						barrier.OrderIndex = orderIndex;
+						barrier.IsBuffer = true;
+						barrier.BufferIndex = access.Index;
+						barrier.BufferFrom = before;
+						barrier.BufferTo = access.BufState;
+						m_CompiledBarriers.push_back(barrier);
+					}
+					bufferState[access.Index] = access.BufState;
+					bufferTouched[access.Index] = true;
+					continue;
+				}
+				const uint32_t texIndex = access.Index;
 				TextureState before = state[texIndex];
 				// A state change OR a write that follows an earlier access
 				// this frame (the same-layout WAW edge the layout-only
@@ -335,8 +393,17 @@ namespace rg {
 		for (uint32_t i : m_Order)
 			m_CompiledPasses.push_back({ m_Passes[i].Name });
 
-		// Keep the final per-texture states for the frame-end carry.
+		// Keep the final per-resource states for the frame-end carry.
 		m_FinalStates = state;
+		m_FinalBufferStates = bufferState;
+	}
+
+	BufferState RenderGraph::GetFinalState(RGBuffer buffer) const
+	{
+		TE_CORE_ASSERT(buffer.Valid(), "querying an invalid virtual buffer");
+		if (buffer.Index < m_FinalBufferStates.size())
+			return m_FinalBufferStates[buffer.Index];
+		return m_Buffers[buffer.Index].State;
 	}
 
 	TextureState RenderGraph::GetFinalState(RGTexture texture) const
@@ -375,11 +442,19 @@ namespace rg {
 		PassResources resources;
 		for (const AccessRecord& access : pass.Accesses)
 		{
-			// One entry per distinct texture.
+			// One entry per distinct resource.
+			if (access.IsBuffer)
+			{
+				const RGBuffer virtualBuffer{ access.Index };
+				if (!IsValid(resources.GetBuffer(virtualBuffer)))
+					resources.Buffers.push_back({ virtualBuffer, m_Buffers[access.Index].Handle });
+				continue;
+			}
+			const RGTexture virtualTexture{ access.Index };
 			bool found = false;
 			for (PassResources::TextureRef& ref : resources.Textures)
 			{
-				if (ref.Virtual == access.Texture)
+				if (ref.Virtual == virtualTexture)
 				{
 					found = true;
 					break;
@@ -389,11 +464,11 @@ namespace rg {
 				continue;
 
 			PassResources::TextureRef ref;
-			ref.Virtual = access.Texture;
-			if (m_Textures[access.Texture.Index].Imported)
-				ref.Handle = m_Textures[access.Texture.Index].Handle;
+			ref.Virtual = virtualTexture;
+			if (m_Textures[access.Index].Imported)
+				ref.Handle = m_Textures[access.Index].Handle;
 			else
-				ref.Handle = m_Pool.GetHandle(TransientTexturePool::MakeKey(m_GraphId, access.Texture.Index));
+				ref.Handle = m_Pool.GetHandle(TransientTexturePool::MakeKey(m_GraphId, access.Index));
 			resources.Textures.push_back(ref);
 		}
 		return resources;
@@ -420,11 +495,26 @@ namespace rg {
 		const uint32_t barrierEnd = m_PassBarrierBegin[orderIndex + 1];
 		std::vector<BarrierDesc> barriers;
 		std::vector<TextureBarrier> textureBarriers;
+		std::vector<BufferBarrier> bufferBarriers;
 		barriers.reserve(barrierEnd - barrierBegin);
 		textureBarriers.reserve(barrierEnd - barrierBegin);
+		bufferBarriers.reserve(barrierEnd - barrierBegin);
 		for (uint32_t i = barrierBegin; i < barrierEnd; i++)
 		{
 			const CompiledBarrier& compiled = m_CompiledBarriers[i];
+			if (compiled.IsBuffer)
+			{
+				bufferBarriers.push_back({});
+				BufferBarrier& bufferBarrier = bufferBarriers.back();
+				bufferBarrier.Buffer = m_Buffers[compiled.BufferIndex].Handle;
+				bufferBarrier.From = compiled.BufferFrom;
+				bufferBarrier.To = compiled.BufferTo;
+				BarrierDesc barrierDesc;
+				barrierDesc.Buffers = &bufferBarrier;
+				barrierDesc.BufferCount = 1;
+				barriers.push_back(barrierDesc);
+				continue;
+			}
 			const VirtualTexture& virtualTexture = m_Textures[compiled.TextureIndex];
 
 			textureBarriers.push_back({});

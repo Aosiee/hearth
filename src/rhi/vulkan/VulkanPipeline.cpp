@@ -29,6 +29,22 @@ namespace TinyEngine {
 		VK_CHECK(vkCreatePipelineLayout(device.GetDevice(), &layoutCreateInfo, nullptr, &m_Layout));
 		device.SetObjectName(VK_OBJECT_TYPE_PIPELINE_LAYOUT, (uint64_t)m_Layout, debugName + " Layout");
 
+		if (spec.ComputeShader)
+		{
+			m_BindPoint = VK_PIPELINE_BIND_POINT_COMPUTE;
+			VkComputePipelineCreateInfo computeInfo{};
+			computeInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+			computeInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			computeInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+			computeInfo.stage.module = spec.ComputeShader->GetHandle();
+			computeInfo.stage.pName = "main";
+			computeInfo.layout = m_Layout;
+			VK_CHECK(vkCreateComputePipelines(device.GetDevice(), cache, 1, &computeInfo, nullptr, &m_Pipeline));
+			device.SetObjectName(VK_OBJECT_TYPE_PIPELINE, (uint64_t)m_Pipeline, debugName);
+			return;
+		}
+		m_BindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+
 		VkPipelineShaderStageCreateInfo stages[2] = {};
 		stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 		stages[0].stage = spec.VertexShader->GetStage();

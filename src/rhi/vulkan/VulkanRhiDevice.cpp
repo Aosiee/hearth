@@ -189,6 +189,9 @@ namespace rhi {
 			case BufferState::TransferSrc:  return VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 			case BufferState::TransferDst:  return VK_PIPELINE_STAGE_2_TRANSFER_BIT;
 			case BufferState::Indirect:     return VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+			case BufferState::ComputeRead:  return VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+			case BufferState::ComputeWrite: return VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+			case BufferState::HostRead:     return VK_PIPELINE_STAGE_2_HOST_BIT;
 			}
 			return VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
 		}
@@ -204,6 +207,9 @@ namespace rhi {
 			case BufferState::TransferSrc:  return VK_ACCESS_2_TRANSFER_READ_BIT;
 			case BufferState::TransferDst:  return VK_ACCESS_2_TRANSFER_WRITE_BIT;
 			case BufferState::Indirect:     return VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+			case BufferState::ComputeRead:  return VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+			case BufferState::ComputeWrite: return VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+			case BufferState::HostRead:     return VK_ACCESS_2_HOST_READ_BIT;
 			}
 			return VK_ACCESS_2_NONE;
 		}
@@ -405,7 +411,8 @@ namespace rhi {
 	void VulkanCommandList::BindPipeline(PipelineHandle pipeline)
 	{
 		m_BoundLayout = m_Device->GetPipelineLayout(pipeline);
-		vkCmdBindPipeline(m_CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_Device->GetPipelineHandle(pipeline));
+		m_BoundBindPoint = m_Device->GetPipelineBindPoint(pipeline);
+		vkCmdBindPipeline(m_CommandBuffer, m_BoundBindPoint, m_Device->GetPipelineHandle(pipeline));
 	}
 
 	void VulkanCommandList::BindGlobalSet()
@@ -422,7 +429,7 @@ namespace rhi {
 		const uint32_t slot = FrameSlot();
 		TE_CORE_ASSERT(slot < VulkanDevice::TotalFrameSlots, "BindGlobalSet with an out-of-range record frame slot");
 		VkDescriptorSet set = m_Device->GetGlobalDescriptorSet(slot);
-		vkCmdBindDescriptorSets(m_CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_BoundLayout, 0, 1, &set, 0, nullptr);
+		vkCmdBindDescriptorSets(m_CommandBuffer, m_BoundBindPoint, m_BoundLayout, 0, 1, &set, 0, nullptr);
 	}
 
 	void VulkanCommandList::SetViewport(float x, float y, float width, float height, float minDepth, float maxDepth)
@@ -910,8 +917,8 @@ namespace rhi {
 		// PARTIALLY_BOUND | UPDATE_AFTER_BIND; deliberately no
 		// VARIABLE_DESCRIPTOR_COUNT (one binding per set, and the full
 		// capacity is allocated anyway - runtimeDescriptorArray sizes the
-		// shader's [] from descriptorCount). ALL_GRAPHICS: no compute
-		// pipelines exist yet. P-F: UPDATE_UNUSED_WHILE_PENDING is the
+		// shader's [] from descriptorCount). Every graphics stage and
+		// compute (one set for every pipeline). UPDATE_UNUSED_WHILE_PENDING is the
 		// safety net for the tombstone rewrites (a freed slot is re-pointed
 		// at the null texture while the set may still be pending).
 		VkDescriptorBindingFlags flags[] = {
@@ -927,11 +934,11 @@ namespace rhi {
 		bindings[0].binding = 0;
 		bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		bindings[0].descriptorCount = kBindlessTextures;
-		bindings[0].stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+		bindings[0].stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT;
 		bindings[1].binding = 1;
 		bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		bindings[1].descriptorCount = kBindlessBuffers;
-		bindings[1].stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS;
+		bindings[1].stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT;
 
 		VkDescriptorSetLayoutCreateInfo layoutInfo{};
 		layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1931,13 +1938,16 @@ namespace rhi {
 		{
 			auto vs = fresher.find(entry.Spec.VertexShader);
 			auto fs = fresher.find(entry.Spec.FragmentShader);
-			if (vs == fresher.end() && fs == fresher.end())
+			auto cs = fresher.find(entry.Spec.ComputeShader);
+			if (vs == fresher.end() && fs == fresher.end() && cs == fresher.end())
 				continue;
 			VulkanPipelineSpec spec = entry.Spec;
 			if (vs != fresher.end())
 				spec.VertexShader = vs->second;
 			if (fs != fresher.end())
 				spec.FragmentShader = fs->second;
+			if (cs != fresher.end())
+				spec.ComputeShader = cs->second;
 			Rebuilt r;
 			r.Handle = entry.Handle;
 			r.Pipeline.Init(m_Vulkan, spec, entry.Name, m_VkPipelineCache);
@@ -2083,10 +2093,50 @@ namespace rhi {
 		// P-A3: every RHI pipeline shares the global bindless set (set 0);
 		// the layout is baked in implicitly - no PipelineStateDesc field.
 		spec.DescriptorSetLayout = m_GlobalSetLayout;
+		return FindOrCreateCachedPipeline(key, spec, debugName);
+	}
+
+	PipelineHandle VulkanRhiDevice::CreateComputePipeline(const ComputePipelineDesc& desc, const char* debugName)
+	{
+		TE_CORE_ASSERT(m_Initialized, "RHI compute pipeline created before the device");
+		// The key's vertex-shader slot holds the compute shader, so
+		// DestroyShader's eviction and InvalidatePipelines match it as they
+		// match a graphics pipeline's shaders; the tag keeps the hash apart
+		// from any graphics state.
+		blake3_hasher hasher;
+		blake3_hasher_init(&hasher);
+		const char tag[] = "compute";
+		blake3_hasher_update(&hasher, tag, sizeof(tag));
+		blake3_hasher_update(&hasher, &desc.PushConstantSize, sizeof(desc.PushConstantSize));
+		uint8_t out[BLAKE3_OUT_LEN];
+		blake3_hasher_finalize(&hasher, out, sizeof(out));
+		PipelineCacheKey key;
+		for (int i = 0; i < 8; i++)
+			key.StateHash = (key.StateHash << 8) | out[i];
+		key.VertexShader = desc.ComputeShader;
+
+		VulkanPipelineSpec spec;
+		spec.ComputeShader = m_Shaders.Get(desc.ComputeShader);
+		TE_CORE_ASSERT(spec.ComputeShader && spec.ComputeShader->GetStage() == VK_SHADER_STAGE_COMPUTE_BIT,
+			"CreateComputePipeline needs a live compute shader");
+		spec.PushConstantSize = desc.PushConstantSize;
+		spec.PushConstantStages = VK_SHADER_STAGE_COMPUTE_BIT;
+		spec.DescriptorSetLayout = m_GlobalSetLayout;
+		return FindOrCreateCachedPipeline(key, spec, debugName);
+	}
+
+	PipelineHandle VulkanRhiDevice::FindOrCreateCachedPipeline(const PipelineCacheKey& key, const VulkanPipelineSpec& spec, const char* debugName)
+	{
+		auto cached = m_PipelineCache.find(key);
+		if (cached != m_PipelineCache.end())
+		{
+			cached->second.RefCount++;
+			return cached->second.Handle;
+		}
 
 		PipelineHandle handle = m_Pipelines.Acquire();
 		VulkanPipeline* pipeline = new VulkanPipeline();
-		pipeline->Init(m_Vulkan, spec, debugName, m_VkPipelineCache);
+		pipeline->Init(m_Vulkan, spec, debugName ? debugName : "", m_VkPipelineCache);
 		m_Pipelines.Publish(handle, std::unique_ptr<VulkanPipeline>(pipeline));
 
 		PipelineCacheEntry entry;
@@ -2355,6 +2405,14 @@ namespace rhi {
 		if (const VulkanPipeline* pipeline = m_Pipelines.GetNoLock(handle))
 			return pipeline->GetHandle();
 		return VK_NULL_HANDLE;
+	}
+
+	VkPipelineBindPoint VulkanRhiDevice::GetPipelineBindPoint(PipelineHandle handle) const
+	{
+		std::shared_lock lock(m_Pipelines.Mutex);
+		if (const VulkanPipeline* pipeline = m_Pipelines.GetNoLock(handle))
+			return pipeline->GetBindPoint();
+		return VK_PIPELINE_BIND_POINT_GRAPHICS;
 	}
 
 	VkPipelineLayout VulkanRhiDevice::GetPipelineLayout(PipelineHandle handle) const

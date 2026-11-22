@@ -90,6 +90,7 @@ namespace rhi {
 		VulkanRhiDevice* m_Device = nullptr;
 		VkCommandBuffer m_CommandBuffer = VK_NULL_HANDLE;
 		VkPipelineLayout m_BoundLayout = VK_NULL_HANDLE;
+		VkPipelineBindPoint m_BoundBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 	};
 
 	// P-D: a wrapped external image (WrapUIImageHandle) - the caller owns the
@@ -271,6 +272,7 @@ namespace rhi {
 		ShaderReloadResult ReloadShader(std::string_view name, std::span<const uint32_t> spirv) override;
 
 		PipelineHandle CreatePipeline(const PipelineStateDesc& desc, const char* debugName) override;
+		PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc, const char* debugName) override;
 		void DestroyPipeline(PipelineHandle handle) override;
 		void InvalidatePipelines(const AssetID& shaderAsset) override;
 
@@ -305,6 +307,7 @@ namespace rhi {
 		VkExtent2D GetTextureSize(TextureHandle handle) const;
 		VkPipeline GetPipelineHandle(PipelineHandle handle) const;
 		VkPipelineLayout GetPipelineLayout(PipelineHandle handle) const;
+		VkPipelineBindPoint GetPipelineBindPoint(PipelineHandle handle) const;
 
 	private:
 		// `slot` (DestroyBuffer's) is the RHI handle whose table slot
@@ -583,6 +586,9 @@ namespace rhi {
 		};
 		std::unordered_map<PipelineCacheKey, PipelineCacheEntry, PipelineCacheKeyHash> m_PipelineCache;
 		uint64_t HashPipelineStateDesc(const PipelineStateDesc& desc);
+		// The cache's shared tail: a hit bumps the refcount, a miss builds
+		// the pipeline from `spec` and publishes it.
+		PipelineHandle FindOrCreateCachedPipeline(const PipelineCacheKey& key, const VulkanPipelineSpec& spec, const char* debugName);
 		void EvictPipelineEntry(const PipelineCacheKey& key);
 		void CreatePipelineCache();
 		void SavePipelineCache();

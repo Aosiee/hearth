@@ -1,0 +1,25 @@
+#version 450
+#extension GL_EXT_nonuniform_qualifier : require
+
+// The RHI self-test's compute check: fills a storage buffer from the
+// bindless set with a pattern the CPU checks after a readback.
+
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform PushConstants
+{
+	uint u_BufferIndex; // the target's slot in the bindless storage array (uniform: no nonuniformEXT)
+	uint u_Count;
+} pc;
+
+layout(binding = 1) buffer TeSelfTestBlock
+{
+	uint values[];
+} u_Buffers[];
+
+void main()
+{
+	const uint i = gl_GlobalInvocationID.x;
+	if (i < pc.u_Count)
+		u_Buffers[pc.u_BufferIndex].values[i] = i * 3u + 7u;
+}

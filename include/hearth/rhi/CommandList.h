@@ -67,8 +67,9 @@ namespace rhi {
 		virtual void Barrier(std::span<const BarrierDesc> barriers) = 0;
 
 		virtual void BindPipeline(PipelineHandle pipeline) = 0;
-		// Binds the device's global bindless descriptor set at set 0. Must
-		// follow BindPipeline (the set layout lives in the pipeline layout).
+		// Binds the device's global bindless descriptor set at set 0, at the
+		// bound pipeline's bind point (graphics or compute). Must follow
+		// BindPipeline (the set layout lives in the pipeline layout).
 		virtual void BindGlobalSet() = 0;
 		virtual void PushConstants(uint32_t stages, uint32_t offset, const void* data, uint32_t size) = 0;
 		virtual void BindVertexBuffer(BufferHandle buffer, uint64_t offset = 0) = 0;
@@ -79,7 +80,8 @@ namespace rhi {
 		virtual void DrawIndexed(uint32_t indexCount, uint32_t instanceCount = 1,
 			uint32_t firstIndex = 0, int32_t vertexOffset = 0, uint32_t firstInstance = 0) = 0;
 
-		virtual void Dispatch(uint32_t groupX, uint32_t groupY, uint32_t groupZ) = 0; // plumbed; no consumer yet
+		// Outside BeginRendering, with a compute pipeline bound.
+		virtual void Dispatch(uint32_t groupX, uint32_t groupY, uint32_t groupZ) = 0;
 
 		virtual void CopyBufferToBuffer(BufferHandle src, BufferHandle dst,
 			uint64_t srcOffset, uint64_t dstOffset, uint64_t size) = 0;

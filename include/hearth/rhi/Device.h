@@ -111,6 +111,15 @@ namespace rhi {
 		uint32_t PushConstantStages = 1; // vertex = 1; VERTEX|FRAGMENT = 1 | 16
 	};
 
+	// A compute pipeline: one shader, the global bindless set at set 0 (as
+	// every pipeline), and a push-constant range for the compute stage
+	// (kPushStageCompute).
+	struct ComputePipelineDesc
+	{
+		ShaderHandle ComputeShader;
+		uint32_t PushConstantSize = 0;
+	};
+
 	enum class ShaderStage : uint8_t { Vertex, Fragment, Compute };
 
 	class Device
@@ -178,6 +187,9 @@ namespace rhi {
 		virtual void InvalidatePipelines(const AssetID& shaderAsset) = 0;
 
 		virtual PipelineHandle CreatePipeline(const PipelineStateDesc& desc, const char* debugName) = 0;
+		// The same pipeline table, cache, invalidation and in-place shader
+		// reload as CreatePipeline; DestroyPipeline releases it.
+		virtual PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc, const char* debugName) = 0;
 		virtual void DestroyPipeline(PipelineHandle handle) = 0;
 
 		virtual CommandListHandle CreateCommandList(QueueHandle queue, uint32_t threadIndex) = 0;

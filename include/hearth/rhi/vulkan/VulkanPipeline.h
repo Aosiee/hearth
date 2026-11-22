@@ -30,6 +30,9 @@ namespace TinyEngine {
 	{
 		VulkanShaderModule* VertexShader = nullptr;
 		VulkanShaderModule* FragmentShader = nullptr;
+		// Set = a compute pipeline: the vertex/fragment shaders and every
+		// fixed-function field below are ignored.
+		VulkanShaderModule* ComputeShader = nullptr;
 
 		uint32_t VertexStride = 0;
 		std::vector<VulkanVertexAttribute> VertexAttributes;
@@ -101,6 +104,7 @@ namespace TinyEngine {
 
 		VkPipeline GetHandle() const { return m_Pipeline; }
 		VkPipelineLayout GetLayout() const { return m_Layout; }
+		VkPipelineBindPoint GetBindPoint() const { return m_BindPoint; }
 
 		// The in-place rebuild's swap (`other` is left holding the old
 		// objects for the retire queue).
@@ -114,6 +118,7 @@ namespace TinyEngine {
 		VulkanDevice* m_Device = nullptr;
 		VkPipelineLayout m_Layout = VK_NULL_HANDLE;
 		VkPipeline m_Pipeline = VK_NULL_HANDLE;
+		VkPipelineBindPoint m_BindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 	};
 
 }

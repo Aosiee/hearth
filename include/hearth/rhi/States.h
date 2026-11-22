@@ -40,7 +40,38 @@ namespace rhi {
 		TransferSrc,
 		TransferDst,
 		Indirect,
+		// A compute shader's storage access: the precise source and
+		// destination around a dispatch (Storage covers every shader stage).
+		ComputeRead,
+		ComputeWrite,
+		// The CPU reads the buffer after the submission completes (a
+		// readback): the device's writes made visible to the host.
+		HostRead,
 	};
+
+	inline const char* BufferStateName(BufferState state)
+	{
+		switch (state)
+		{
+		case BufferState::Undefined:    return "Undefined";
+		case BufferState::VertexIndex:  return "VertexIndex";
+		case BufferState::Uniform:      return "Uniform";
+		case BufferState::Storage:      return "Storage";
+		case BufferState::TransferSrc:  return "TransferSrc";
+		case BufferState::TransferDst:  return "TransferDst";
+		case BufferState::Indirect:     return "Indirect";
+		case BufferState::ComputeRead:  return "ComputeRead";
+		case BufferState::ComputeWrite: return "ComputeWrite";
+		case BufferState::HostRead:     return "HostRead";
+		}
+		return "Unknown";
+	}
+
+	// The shader stages a push-constant range covers (a pipeline's
+	// PushConstantStages, a PushConstants call's stages).
+	inline constexpr uint32_t kPushStageVertex = 1;
+	inline constexpr uint32_t kPushStageFragment = 16;
+	inline constexpr uint32_t kPushStageCompute = 32;
 
 	enum class QueueKind : uint8_t
 	{

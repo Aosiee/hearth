@@ -69,6 +69,7 @@ namespace rg_tests {
 		ShaderReloadResult ReloadShader(std::string_view, std::span<const uint32_t>) override { return {}; }
 		void InvalidatePipelines(const AssetID&) override {}
 		rhi::PipelineHandle CreatePipeline(const rhi::PipelineStateDesc&, const char*) override { return {}; }
+		rhi::PipelineHandle CreateComputePipeline(const rhi::ComputePipelineDesc&, const char*) override { return {}; }
 		void DestroyPipeline(rhi::PipelineHandle) override {}
 
 		rhi::CommandListHandle CreateCommandList(rhi::QueueHandle, uint32_t) override { return {}; }
@@ -93,6 +94,8 @@ namespace rg_tests {
 		explicit MockCommandList(uint32_t frameSlot = 0) : rhi::CommandList(frameSlot) {}
 
 		std::vector<std::pair<rhi::TextureState, rhi::TextureState>> Barriers;
+		std::vector<std::pair<rhi::BufferState, rhi::BufferState>> BufferBarriers;
+		uint32_t Dispatches = 0;
 
 		void Begin() override {}
 		void End() override {}
@@ -108,6 +111,8 @@ namespace rg_tests {
 			{
 				for (uint32_t i = 0; i < barrier.TextureCount; i++)
 					Barriers.push_back({ barrier.Textures[i].From, barrier.Textures[i].To });
+				for (uint32_t i = 0; i < barrier.BufferCount; i++)
+					BufferBarriers.push_back({ barrier.Buffers[i].From, barrier.Buffers[i].To });
 			}
 		}
 
@@ -118,7 +123,7 @@ namespace rg_tests {
 		void BindIndexBuffer(rhi::BufferHandle, uint64_t) override {}
 		void Draw(uint32_t, uint32_t, uint32_t, uint32_t) override {}
 		void DrawIndexed(uint32_t, uint32_t, uint32_t, int32_t, uint32_t) override {}
-		void Dispatch(uint32_t, uint32_t, uint32_t) override {}
+		void Dispatch(uint32_t, uint32_t, uint32_t) override { Dispatches++; }
 		void CopyBufferToBuffer(rhi::BufferHandle, rhi::BufferHandle, uint64_t, uint64_t, uint64_t) override {}
 		void CopyBufferToTexture(rhi::BufferHandle, rhi::TextureHandle, uint32_t, uint32_t) override {}
 		void CopyTextureToBuffer(rhi::TextureHandle, rhi::BufferHandle, uint32_t, uint32_t) override {}
@@ -137,6 +142,13 @@ namespace rg_tests {
 		rhi::TextureHandle ImportHandle(uint32_t index)
 		{
 			rhi::TextureHandle handle;
+			handle.Index = index;
+			return handle;
+		}
+
+		rhi::BufferHandle BufferHandleAt(uint32_t index)
+		{
+			rhi::BufferHandle handle;
 			handle.Index = index;
 			return handle;
 		}
@@ -772,6 +784,98 @@ namespace rg_tests {
 		}
 
 		loomPool.Shutdown();
+	}
+
+	TEST_CASE("rendergraph: buffer barriers follow the compute -> vertex-input chain")
+	{
+		MockDevice device;
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture target = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+		rg::RGBuffer skinned = graph.ImportBuffer(BufferHandleAt(7), rhi::BufferState::VertexIndex);
+
+		auto& skin = graph.AddPass("Skin");
+		skin.Write(skinned, rhi::BufferState::ComputeWrite);
+		skin.SetExecute([](rhi::CommandList& list, const rg::PassResources&) { list.Dispatch(4, 1, 1); });
+
+		auto& draw = graph.AddPass("GBuffer");
+		draw.Read(skinned, rhi::BufferState::VertexIndex);
+		draw.Write(target, rhi::TextureState::RenderTarget);
+		rhi::BufferHandle drawn{};
+		draw.SetExecute([&](rhi::CommandList&, const rg::PassResources& resources) { drawn = resources.GetBuffer(skinned); });
+
+		graph.Compile();
+		REQUIRE(graph.GetCompiledPassCount() == 2);
+		CHECK(NameAt(graph, 0) == "Skin");
+		CHECK(graph.DependsOn(1, 0));
+
+		// Last frame's vertex read -> the compute write, then the write ->
+		// this frame's vertex read: the edge the frame debugger lists.
+		std::vector<std::pair<std::string, std::string>> buffer;
+		for (const auto& barrier : graph.GetCompiledBarriers())
+			if (barrier.IsBuffer)
+				buffer.push_back({ barrier.FromName(), barrier.ToName() });
+		REQUIRE(buffer.size() == 2);
+		CHECK(buffer[0] == std::make_pair(std::string("VertexIndex"), std::string("ComputeWrite")));
+		CHECK(buffer[1] == std::make_pair(std::string("ComputeWrite"), std::string("VertexIndex")));
+		CHECK(graph.GetFinalState(skinned) == rhi::BufferState::VertexIndex);
+
+		MockCommandList list;
+		graph.Execute(device, list);
+		CHECK(list.Dispatches == 1);
+		CHECK(drawn.Index == 7);
+		REQUIRE(list.BufferBarriers.size() == 2);
+		CHECK(list.BufferBarriers[1] == std::make_pair(rhi::BufferState::ComputeWrite, rhi::BufferState::VertexIndex));
+	}
+
+	TEST_CASE("rendergraph: two compute writes to one buffer are fenced and kept in order")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGBuffer data = graph.ImportBuffer(BufferHandleAt(3), rhi::BufferState::Undefined);
+
+		auto& first = graph.AddPass("First");
+		first.Write(data, rhi::BufferState::ComputeWrite);
+		first.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+		auto& second = graph.AddPass("Second");
+		second.Write(data, rhi::BufferState::ComputeWrite);
+		second.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+		REQUIRE(graph.GetCompiledPassCount() == 2);
+		CHECK(graph.DependsOn(1, 0));
+		uint32_t waw = 0;
+		for (const auto& barrier : graph.GetCompiledBarriers())
+			if (barrier.IsBuffer && barrier.OrderIndex == 1 && barrier.BufferFrom == rhi::BufferState::ComputeWrite)
+				waw++;
+		CHECK(waw == 1);
+	}
+
+	TEST_CASE("rendergraph: a compute pass whose buffer nothing live reads is culled")
+	{
+		rg::TransientTexturePool pool;
+		rg::RenderGraph graph(pool);
+		rg::RGTexture target = graph.Import(ImportHandle(1), rhi::TextureState::Undefined);
+		rg::RGTexture scratch = graph.CreateTexture({});
+		rg::RGBuffer data = graph.ImportBuffer(BufferHandleAt(3), rhi::BufferState::Undefined);
+
+		// A buffer is imported, so writing it keeps a pass live...
+		auto& fill = graph.AddPass("Fill");
+		fill.Write(data, rhi::BufferState::ComputeWrite);
+		fill.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+		// ...and a pass that only reads it, writing nothing live, is culled.
+		auto& unused = graph.AddPass("Unused");
+		unused.Read(data, rhi::BufferState::ComputeRead);
+		unused.Write(scratch, rhi::TextureState::RenderTarget);
+		unused.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+		auto& present = graph.AddPass("Present");
+		present.Write(target, rhi::TextureState::Present);
+		present.SetExecute([](rhi::CommandList&, const rg::PassResources&) {});
+
+		graph.Compile();
+		REQUIRE(graph.GetCompiledPassCount() == 2);
+		CHECK(NameAt(graph, 0) == "Fill");
+		CHECK(NameAt(graph, 1) == "Present");
 	}
 
 } // namespace rg_tests
