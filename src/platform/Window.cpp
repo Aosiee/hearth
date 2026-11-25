@@ -1,6 +1,9 @@
 // The Window on GLFW. Every callback turns into an Event on the Platform's
 // queue, in the order GLFW calls them.
 
+// No OpenGL header (GLFW includes one by default), and GLFW's Vulkan
+// declarations.
+#define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 

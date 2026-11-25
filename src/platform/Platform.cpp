@@ -1,6 +1,9 @@
 // The Platform on GLFW. This file and Window.cpp are the only ones that
 // include GLFW: nothing outside hearth/platform names it.
 
+// No OpenGL header (GLFW includes one by default), and GLFW's Vulkan
+// declarations.
+#define GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
