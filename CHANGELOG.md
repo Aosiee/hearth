@@ -20,6 +20,9 @@ A window's frame: TinyEngine's window presenter, as
   opens with the clear and closes with the present transition.
 - `VulkanDevice::TryGetGpuFrameDebugSink`: the frame-debug sink is
   optional, and the presenter writes frame data only when one is set.
+- `hearth::default_host` is an object library, so it links whatever its
+  place on the link line (as an archive, GNU ld dropped it when it came
+  before `hearth::platform` or `hearth::rhi`).
 - `hearth_rhi_gpu_tests` gains the presenter's cases: the clients' order
   and slots, the park, and a client's graph in the frame's submit.
 

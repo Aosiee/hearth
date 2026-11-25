@@ -161,8 +161,10 @@ if(HEARTH_GPU_DEBUG)
 endif()
 hearth_flags(hearth_rhi)
 
-# hearth::default_host - the host for a program without one of its own.
-add_library(hearth_default_host STATIC src/default_host/DefaultHost.cpp)
+# hearth::default_host - the host for a program without one of its own. An
+# object library: the libraries call into it, so as an archive a linker that
+# reads in order (GNU ld) would drop it when it came before them.
+add_library(hearth_default_host OBJECT src/default_host/DefaultHost.cpp)
 add_library(hearth::default_host ALIAS hearth_default_host)
 target_link_libraries(hearth_default_host PUBLIC hearth_core)
 hearth_flags(hearth_default_host)
