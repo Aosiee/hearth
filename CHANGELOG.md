@@ -4,7 +4,10 @@ Each release is an annotated tag (`v0.x.0`, or `v0.x.y` for a release of
 fixes only) whose message is the entry below. Versions before 1.0 may change
 the API; every entry says what callers need to change.
 
-## Unreleased
+## 0.2.0
+
+The GPU layer: TinyEngine's RHI, render graph and Vulkan device, as
+`hearth::rhi`.
 
 - `hearth::rhi`: the GPU layer, moved here from TinyEngine with its
   history. The RHI interface (`Device`, `CommandList`, states, formats,
@@ -21,6 +24,9 @@ the API; every entry says what callers need to change.
   loom, BLAKE3, SPIRV-Cross.
 - The suite gains `hearth_rhi_tests` and `hearth_rhi_gpu_tests` (run on
   Mesa's lavapipe in CI).
+
+Nothing changes for callers of 0.1: the new module is added beside
+`hearth::core` and `hearth::platform`.
 
 ## 0.1.1
 
