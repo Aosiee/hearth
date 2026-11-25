@@ -2,6 +2,6 @@
 
 // Hearth's version, set once here (CMakeLists.txt reads it).
 #define HEARTH_VERSION_MAJOR 0
-#define HEARTH_VERSION_MINOR 4
+#define HEARTH_VERSION_MINOR 5
 #define HEARTH_VERSION_PATCH 0
-#define HEARTH_VERSION_STRING "0.4.0"
+#define HEARTH_VERSION_STRING "0.5.0"

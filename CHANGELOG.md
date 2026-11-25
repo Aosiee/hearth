@@ -4,7 +4,7 @@ Each release is an annotated tag (`v0.x.0`, or `v0.x.y` for a release of
 fixes only) whose message is the entry below. Versions before 1.0 may change
 the API; every entry says what callers need to change.
 
-## Unreleased
+## 0.5.0
 
 The app: the loop's owner for a program that is not an engine, and a
 presenter that draws offscreen.
