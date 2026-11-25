@@ -25,7 +25,7 @@ set(HEARTH_HAMR_DIR "" CACHE PATH "A hamr checkout, for the suite's test library
 set(HEARTH_HAMR_COMMIT a4d43e9ffe9c084955d28aab5d77c71ff2c8f597) # hamr 0.1.0 (v0.1.0)
 # The platform's window system and its Vulkan surface types.
 set(HEARTH_GLFW_DIR "" CACHE PATH "A GLFW checkout (empty: fetch the pinned commit of TinyEngine's fork)")
-set(HEARTH_GLFW_COMMIT b98508b1f7904fe24421454638d7817e9d9e8a09)
+set(HEARTH_GLFW_COMMIT 21b45cdfe6547987a711673982cb10e0905f0722)
 set(HEARTH_VULKAN_HEADERS_DIR "" CACHE PATH "A Vulkan-Headers checkout (empty: fetch the pinned tag)")
 set(HEARTH_VULKAN_HEADERS_TAG v1.4.354)
 # Only GLFW's null platform: no X11 or Wayland libraries needed, and no
