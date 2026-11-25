@@ -1670,15 +1670,14 @@ namespace hearth::rhi {
 
 		TextureHandle handle = m_Textures.Acquire();
 		VulkanImage2D* texture = nullptr;
-		// The graph-transient RENDER TARGET path - an attachment in the
-		// requested format, sampled back by the lighting/post passes. Depth
-		// transients are NOT needed (the G-buffer pass shares the target's
-		// own D32 depth) - assert instead of half-supporting.
+		// The RENDER TARGET path - a colour or depth attachment in the
+		// requested format, sampled back by the passes that read it.
 		if (desc.RenderTarget || desc.DepthTarget)
 		{
-			HEARTH_ASSERT(!desc.DepthTarget, "depth render-target transients unsupported - the G-buffer shares the target's D32");
-			HEARTH_ASSERT(desc.MipLevels == 1, "render-target transients are single-level");
-			texture = new VulkanImage2D(*this, desc.Width, desc.Height, ToVkFormat(desc.PixelFormat), false);
+			HEARTH_ASSERT(!(desc.RenderTarget && desc.DepthTarget), "a render target is colour or depth, not both");
+			HEARTH_ASSERT(!desc.DepthTarget || desc.PixelFormat == Format::D32_SFLOAT, "a depth target is D32_SFLOAT");
+			HEARTH_ASSERT(desc.MipLevels == 1, "render targets are single-level");
+			texture = new VulkanImage2D(*this, desc.Width, desc.Height, ToVkFormat(desc.PixelFormat), desc.DepthTarget);
 		}
 		else if (desc.MipLevels == 1)
 		{
@@ -1708,7 +1707,9 @@ namespace hearth::rhi {
 		// with the fixed sampler the caller chose (UPDATE_AFTER_BIND - safe
 		// at creation). Multi-mip textures keep the baked sampler (a fixed
 		// maxLod-0 sampler would defeat the mip chain).
-		if (desc.MipLevels == 1)
+		// A depth target keeps the nearest sampler its constructor wrote
+		// (depth is never filtered).
+		if (desc.MipLevels == 1 && !desc.DepthTarget)
 		{
 			WriteTextureDescriptor(texture->GetBindlessIndex(), texture->GetImageView(),
 				desc.Sampler == SamplerKind::Nearest ? m_FixedSamplerNearest : m_FixedSamplerLinear,

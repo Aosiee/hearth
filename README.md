@@ -16,8 +16,9 @@ and the libraries on it log, assert, profile and report a GPU without
 depending on the program's own logging, profiler or crash reporter) and the
 **platform** (windows, events, input, the clipboard, gamepads, Vulkan
 surfaces), the **frame loop** (fixed phases the program's steps register
-into) and the **GPU layer** (a Vulkan device behind a small RHI, a render
-graph, and the presenter that runs a window's frame).
+into), the **GPU layer** (a Vulkan device behind a small RHI, a render
+graph, and the presenter that runs a window's frame) and the **app** (all of
+them put together for a program that is not an engine).
 
 Hearth was written for [TinyEngine](https://github.com/Aosiee/TinyEngine)
 and knows nothing about it.
@@ -181,16 +182,51 @@ presenter.SetClients(clients);
 while (running)
     presenter.Present();
 ```
+- **Offscreen**, a presenter has no swapchain. Given `OffscreenImage`, it
+  draws its frames into an image of its own (colour and depth) through the
+  same swapchain graph, so its clients draw as they do into a window, and
+  `ReadOffscreenImage` reads the pixels back.
 - **Developer tools** (validation layers, object names, debug labels, GPU
   timestamps for the program's profiler and frame debugger) build with
   `HEARTH_GPU_DEBUG` (`-DHEARTH_GPU_DEBUG=OFF` leaves them out).
+
+## The app
+
+`hearth::App` (`hearth/App.h`, `hearth::app`) is all of the above for a
+program that is not an engine: the platform, the main window, a thread
+pool, the device, the main window's presenter and the frame loop, plus the
+command-line flags such programs share.
+
+```cpp
+#include "hearth/App.h"
+
+int main(int argc, char** argv)
+{
+    hearth::App app(hearth::App::ParseArgs(argc, argv, { .Title = "Hello", .Width = 640, .Height = 400 }));
+    app.AddFrameClient(scene);                                  // what the window draws
+    app.AddEventHandler([&](const hearth::platform::Event& e) { return scene.OnEvent(e); });
+    app.GetLoop().Add(hearth::Phase::Update, 100, "scene.update", [&](const hearth::Frame& f) { scene.Update(f.Delta); });
+    return app.Run();
+}
+```
+
+- **The flags:** `--display-mode windowed|hidden|offscreen`,
+  `--render-target WxH`, `--capture-ui <png>`, `--fixed-dt <seconds>`,
+  `--frames N`, `--min-frames N`, `--platform <backend>`. The rest stay in
+  `AppDesc::Args` for the program.
+- **Offscreen** there is no window and no display server: the platform is
+  the null one and the frames draw into the presenter's offscreen image.
+- **The capture:** `--capture-ui` (offscreen) writes the PNG at the first
+  frame past `--min-frames` (and the program's `SetCaptureReady`), with a
+  sidecar `<png>.json` holding the BLAKE3 of its pixels; the run exits 0.
+  A frame limit reached first exits 3, a flag it cannot read 2.
 
 ## Building
 
 C++20 (`std::format`), GLFW (TinyEngine's fork, fetched at its pinned
 commit) and Vulkan-Headers for the platform; volk, the Vulkan Memory
-Allocator, loom, BLAKE3 and SPIRV-Cross for the GPU layer; and for the
-suite hamr's C++ test library. Linux is what is checked today;
+Allocator, loom, BLAKE3 and SPIRV-Cross for the GPU layer; stb_image_write
+for the app's capture; and for the suite hamr's C++ test library. Linux is what is checked today;
 `-DHEARTH_NULL_PLATFORM_ONLY=ON` builds GLFW with its null platform alone
 (no window-system libraries, as CI does).
 
@@ -203,8 +239,9 @@ build/hearth_rhi_tests && build/hearth_rhi_gpu_tests   # the second needs a Vulk
 
 Each dependency is fetched at the commit or tag `CMakeLists.txt` pins;
 `-DHEARTH_<NAME>_DIR=<dir>` uses a local checkout. A host build adds Hearth
-with `add_subdirectory` and links `hearth::core`, `hearth::platform` or
-`hearth::rhi` (plus `hearth::default_host` if it has no host of its own).
+with `add_subdirectory` and links `hearth::core`, `hearth::platform`,
+`hearth::rhi` or `hearth::app` (plus `hearth::default_host` if it has no
+host of its own).
 The GPU suite runs on any Vulkan 1.3 device; CI uses Mesa's lavapipe. The full suite, side by side and in every configuration, runs
 through [hamr](https://github.com/Aosiee/hamr): `hamr run` (`--tier
 nightly` adds the sanitizers).

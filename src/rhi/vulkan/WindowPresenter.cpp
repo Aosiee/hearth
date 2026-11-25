@@ -58,12 +58,18 @@ namespace hearth::rhi {
 
 	VkExtent2D SwapchainGraph::Extent() const
 	{
-		return m_Presenter.m_Swapchain.GetExtent();
+		return m_Presenter.GetTargetExtent();
 	}
 
 	void SwapchainGraph::BeginRendering(VulkanCommandList& list, bool clear) const
 	{
 		m_Presenter.BeginSwapchainRendering(list, m_ImageIndex, clear);
+	}
+
+	void SwapchainGraph::BeginRendering(CommandList& list, bool clear) const
+	{
+		// Every list a presenter's record hands out is the Vulkan one.
+		m_Presenter.BeginSwapchainRendering(static_cast<VulkanCommandList&>(list), m_ImageIndex, clear);
 	}
 
 	WindowPresenter::WindowPresenter(VulkanRhiDevice& device, const WindowPresenterDesc& desc)
@@ -82,6 +88,22 @@ namespace hearth::rhi {
 
 		if (!m_Offscreen)
 			m_Swapchain.Init(*m_Device, m_RhiDevice, m_Window);
+		else if (desc.OffscreenImage)
+		{
+			HEARTH_ASSERT(m_OffscreenWidth > 0 && m_OffscreenHeight > 0, "an offscreen image needs a size");
+			TextureDesc colour;
+			colour.Width = m_OffscreenWidth;
+			colour.Height = m_OffscreenHeight;
+			colour.PixelFormat = Format::B8G8R8A8_UNORM;
+			colour.RenderTarget = true;
+			m_OffscreenColour = m_RhiDevice.CreateTexture(colour, nullptr, 0, "Offscreen Window Colour");
+			TextureDesc depth = colour;
+			depth.PixelFormat = Format::D32_SFLOAT;
+			depth.RenderTarget = false;
+			depth.DepthTarget = true;
+			m_DepthHandle = m_RhiDevice.CreateTexture(depth, nullptr, 0, "Offscreen Window Depth");
+			m_DepthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		}
 
 		// The window's frame slots on the shared device: command pools and
 		// every per-frame-in-flight resource it touches live in
@@ -166,6 +188,9 @@ namespace hearth::rhi {
 		if (IsValid(m_DepthHandle))
 			m_RhiDevice.DestroyTexture(m_DepthHandle);
 		m_DepthHandle = {};
+		if (IsValid(m_OffscreenColour))
+			m_RhiDevice.DestroyTexture(m_OffscreenColour);
+		m_OffscreenColour = {};
 
 		// The main window clears the device's main context on the way out
 		// (after its submit thread's join: the last record still reads it).
@@ -567,7 +592,7 @@ namespace hearth::rhi {
 				if (client)
 					client->RecordTargets(record);
 			}
-			if (!m_Offscreen)
+			if (!m_Offscreen || IsValid(m_OffscreenColour))
 				RecordSwapchainGraph(record, recordGraph);
 
 			// The clients clear what the record read; the slot-free signal
@@ -622,13 +647,20 @@ namespace hearth::rhi {
 	void WindowPresenter::RecordSwapchainGraph(const FrameRecord& record, const std::function<void(rg::RenderGraph&)>& recordGraph)
 	{
 		rg::RenderGraph graph(m_TransientPool);
-		// Imported in the acquired state, so the first barrier chains with
-		// the acquire's wait.
-		const rg::RGTexture image = graph.Import(m_Swapchain.GetImageHandle(record.ImageIndex), TextureState::SwapchainAcquired);
+		// A swapchain image is imported in the acquired state, so the first
+		// barrier chains with the acquire's wait; the offscreen image in the
+		// state its last frame left it in.
+		const rg::RGTexture image = m_Offscreen
+			? graph.Import(m_OffscreenColour, m_OffscreenColourState)
+			: graph.Import(m_Swapchain.GetImageHandle(record.ImageIndex), TextureState::SwapchainAcquired);
 		SwapchainGraph swapchain(*this, graph, image, record.ImageIndex);
 
 		auto& clearPass = graph.AddPass("Clear Swapchain");
 		clearPass.Write(image, TextureState::RenderTarget);
+		// The scope opens the depth too: a swapchain's is created in its
+		// attachment layout, the offscreen image's starts undefined.
+		if (m_Offscreen)
+			clearPass.Write(swapchain.Depth(), TextureState::DepthWrite);
 		const uint32_t imageIndex = record.ImageIndex;
 		clearPass.SetExecute([this, imageIndex](CommandList& list, const rg::PassResources&)
 		{
@@ -645,10 +677,13 @@ namespace hearth::rhi {
 				client->RecordSwapchain(swapchain, record);
 		}
 
-		auto& presentPass = graph.AddPass("Present Transition");
-		// Declaration-only: the graph emits the attachment -> present barrier
-		// before this empty pass, after the last scope closed.
-		presentPass.Write(image, TextureState::Present);
+		if (!m_Offscreen)
+		{
+			auto& presentPass = graph.AddPass("Present Transition");
+			// Declaration-only: the graph emits the attachment -> present
+			// barrier before this empty pass, after the last scope closed.
+			presentPass.Write(image, TextureState::Present);
+		}
 
 		graph.Compile();
 
@@ -675,6 +710,8 @@ namespace hearth::rhi {
 		graph.RecordFinalStates();
 		if (swapchain.HasDepth())
 			m_DepthLayout = StateToLayout(graph.GetFinalState(swapchain.Depth()));
+		if (m_Offscreen)
+			m_OffscreenColourState = graph.GetFinalState(image);
 
 		for (FrameClient* client : m_Clients)
 		{
@@ -695,7 +732,7 @@ namespace hearth::rhi {
 
 		VkRenderingAttachmentInfo colourAttachment{};
 		colourAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-		colourAttachment.imageView = m_Swapchain.GetImageView(imageIndex);
+		colourAttachment.imageView = m_Offscreen ? m_RhiDevice.GetTextureView(m_OffscreenColour) : m_Swapchain.GetImageView(imageIndex);
 		colourAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		colourAttachment.loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 		colourAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -706,7 +743,7 @@ namespace hearth::rhi {
 
 		VkRenderingAttachmentInfo depthAttachment{};
 		depthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-		depthAttachment.imageView = m_Swapchain.GetDepthImageView();
+		depthAttachment.imageView = m_Offscreen ? m_RhiDevice.GetTextureView(m_DepthHandle) : m_Swapchain.GetDepthImageView();
 		depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
 		depthAttachment.loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 		depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -715,13 +752,90 @@ namespace hearth::rhi {
 		VkRenderingInfo renderingInfo{};
 		renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
 		renderingInfo.renderArea.offset = { 0, 0 };
-		renderingInfo.renderArea.extent = m_Swapchain.GetExtent();
+		renderingInfo.renderArea.extent = GetTargetExtent();
 		renderingInfo.layerCount = 1;
 		renderingInfo.colorAttachmentCount = 1;
 		renderingInfo.pColorAttachments = &colourAttachment;
 		renderingInfo.pDepthAttachment = &depthAttachment;
 
 		vkCmdBeginRendering(commandBuffer, &renderingInfo);
+	}
+
+	VkExtent2D WindowPresenter::GetTargetExtent() const
+	{
+		return m_Offscreen ? VkExtent2D{ m_OffscreenWidth, m_OffscreenHeight } : m_Swapchain.GetExtent();
+	}
+
+	bool WindowPresenter::ReadOffscreenImage(std::vector<uint8_t>& outRgba)
+	{
+		HEARTH_ASSERT(IsLoopThread(), "the offscreen image is read on the loop thread");
+		if (!IsValid(m_OffscreenColour))
+			return false;
+		// Every enqueued frame submitted; the copy below queues after them on
+		// the same queue, and its own wait covers them.
+		WaitForSubmitIdle();
+		if (m_OffscreenColourState == TextureState::Undefined)
+			return false;
+
+		const VkDeviceSize size = (VkDeviceSize)m_OffscreenWidth * m_OffscreenHeight * 4;
+		VkBufferCreateInfo bufferInfo{};
+		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		bufferInfo.size = size;
+		bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+		allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		VkBuffer staging = VK_NULL_HANDLE;
+		VmaAllocation stagingAllocation = VK_NULL_HANDLE;
+		VmaAllocationInfo stagingInfo{};
+		VK_CHECK(vmaCreateBuffer(m_Device->GetAllocator(), &bufferInfo, &allocInfo, &staging, &stagingAllocation, &stagingInfo));
+
+		const VkImage image = m_RhiDevice.GetTextureImage(m_OffscreenColour);
+		const VkImageLayout resting = StateToLayout(m_OffscreenColourState);
+		const auto barrier = [image](VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 srcStage,
+								 VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess) {
+			VkImageMemoryBarrier2 b{};
+			b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+			b.srcStageMask = srcStage;
+			b.srcAccessMask = srcAccess;
+			b.dstStageMask = dstStage;
+			b.dstAccessMask = dstAccess;
+			b.oldLayout = from;
+			b.newLayout = to;
+			b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			b.image = image;
+			b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+			VkDependencyInfo dependency{};
+			dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+			dependency.imageMemoryBarrierCount = 1;
+			dependency.pImageMemoryBarriers = &b;
+			vkCmdPipelineBarrier2(cmd, &dependency);
+		};
+		VkCommandBuffer cmd = m_Device->BeginSingleTimeCommands();
+		barrier(cmd, resting, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+			VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+		VkBufferImageCopy region{};
+		region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+		region.imageExtent = { m_OffscreenWidth, m_OffscreenHeight, 1 };
+		vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
+		barrier(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, resting, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+			VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+		m_Device->EndSingleTimeCommands(cmd);
+
+		vmaInvalidateAllocation(m_Device->GetAllocator(), stagingAllocation, 0, VK_WHOLE_SIZE);
+		const uint8_t* bgra = static_cast<const uint8_t*>(stagingInfo.pMappedData);
+		outRgba.resize((size_t)size);
+		for (size_t i = 0; i + 3 < (size_t)size; i += 4)
+		{
+			outRgba[i + 0] = bgra[i + 2];
+			outRgba[i + 1] = bgra[i + 1];
+			outRgba[i + 2] = bgra[i + 0];
+			outRgba[i + 3] = 255; // a window presents opaque pixels
+		}
+		vmaDestroyBuffer(m_Device->GetAllocator(), staging, stagingAllocation);
+		return true;
 	}
 
 	void WindowPresenter::WaitForSubmitIdle()

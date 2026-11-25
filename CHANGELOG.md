@@ -4,6 +4,33 @@ Each release is an annotated tag (`v0.x.0`, or `v0.x.y` for a release of
 fixes only) whose message is the entry below. Versions before 1.0 may change
 the API; every entry says what callers need to change.
 
+## Unreleased
+
+The app: the loop's owner for a program that is not an engine, and a
+presenter that draws offscreen.
+
+- `hearth::App` (`hearth/App.h`, the new `hearth::app` library): the
+  platform, the main window, a thread pool (unless the program runs one),
+  the device, the main window's presenter and the frame loop, with the
+  pump, the event dispatch to the program's handlers, the present, the
+  capture and the frame limit as loop clients. `App::ParseArgs` reads the
+  shared flags (`--display-mode`, `--render-target`, `--capture-ui`,
+  `--fixed-dt`, `--frames`, `--min-frames`, `--platform`) and keeps the
+  rest for the program. `PostEvent` queues an event as the platform would
+  (a script's input).
+- The capture: `--capture-ui` (offscreen) writes the PNG and a sidecar
+  with the BLAKE3 of its pixels, then exits 0; a frame limit reached first
+  exits 3, an unreadable flag 2.
+- `WindowPresenterDesc::OffscreenImage`: an offscreen presenter draws its
+  frames into its own colour and depth images through the swapchain
+  graph, so its clients' `RecordSwapchain` draws offscreen too;
+  `ReadOffscreenImage` reads the colour back as RGBA8.
+- `CreateTexture` makes standalone depth targets (`DepthTarget`,
+  `D32_SFLOAT`).
+
+Nothing changes for callers of 0.4. Hearth now fetches stb (for
+`stb_image_write`); `-DHEARTH_STB_DIR=<dir>` uses a local checkout.
+
 ## 0.4.0
 
 The frame loop: TinyEngine's run loop, as `hearth::Loop`.

@@ -11,7 +11,7 @@
 //     hamr run --tier nightly        every configuration
 //     hamr run --set hamrDir=<dir>   a local hamr checkout instead of fetching
 //     hamr run --set glfwDir=<dir> --set vulkanHeadersDir=<dir>   the same for GLFW and Vulkan-Headers
-//     (and volkDir, vmaDir, loomDir, blake3Dir, spirvCrossDir for the GPU layer's)
+//     (and volkDir, vmaDir, loomDir, blake3Dir, spirvCrossDir for the GPU layer's, stbDir for the app's)
 //
 // GLFW builds with its null platform only (the platform cases run on it), as
 // in CI: no display or window-system libraries needed.
@@ -26,13 +26,14 @@ const hamrDir = suite:var("hamrDir", "")
 const glfwDir = suite:var("glfwDir", "")
 const vulkanHeadersDir = suite:var("vulkanHeadersDir", "")
 // The GPU layer's libraries, the same way: volkDir, vmaDir, loomDir,
-// blake3Dir, spirvCrossDir.
+// blake3Dir, spirvCrossDir; and the app's stb, stbDir.
 const libraryDirs: { { name: string, option: string } } = {
 	{ name = "volkDir", option = "HEARTH_VOLK_DIR" },
 	{ name = "vmaDir", option = "HEARTH_VMA_DIR" },
 	{ name = "loomDir", option = "HEARTH_LOOM_DIR" },
 	{ name = "blake3Dir", option = "HEARTH_BLAKE3_DIR" },
 	{ name = "spirvCrossDir", option = "HEARTH_SPIRV_CROSS_DIR" },
+	{ name = "stbDir", option = "HEARTH_STB_DIR" },
 }
 const libraryFlags: { string } = {}
 for (_, library in libraryDirs) {

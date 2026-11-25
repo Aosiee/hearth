@@ -48,6 +48,9 @@ set(HEARTH_BLAKE3_DIR "" CACHE PATH "A BLAKE3 checkout (empty: fetch the pinned 
 set(HEARTH_BLAKE3_TAG 1.5.4)
 set(HEARTH_SPIRV_CROSS_DIR "" CACHE PATH "A SPIRV-Cross checkout (empty: fetch the pinned tag)")
 set(HEARTH_SPIRV_CROSS_TAG vulkan-sdk-1.4.328.0)
+# stb_image_write, for hearth::app's capture.
+set(HEARTH_STB_DIR "" CACHE PATH "An stb checkout (empty: fetch the pinned commit)")
+set(HEARTH_STB_COMMIT 6b5799bae8a1fe3792691ef4b72ae26434c3e799)
 
 set(HEARTH_SANITIZE_FLAGS "")
 if(HEARTH_SANITIZE)
@@ -163,6 +166,17 @@ if(HEARTH_GPU_DEBUG)
 endif()
 hearth_flags(hearth_rhi)
 
+# hearth::app - the loop's owner for a program that is not an engine: the
+# platform, the main window, a thread pool, the device, the main window's
+# presenter and the capture flags (the PNG through stb_image_write, the
+# sidecar's hash through BLAKE3).
+hearth_source_of(stb https://github.com/nothings/stb.git ${HEARTH_STB_COMMIT} HEARTH_STB_DIR HEARTH_STB_SOURCE)
+add_library(hearth_app STATIC src/app/App.cpp)
+add_library(hearth::app ALIAS hearth_app)
+target_include_directories(hearth_app SYSTEM PRIVATE "${HEARTH_STB_SOURCE}")
+target_link_libraries(hearth_app PUBLIC hearth_core hearth_platform hearth_rhi PRIVATE hearth_blake3)
+hearth_flags(hearth_app)
+
 # hearth::default_host - the host for a program without one of its own. An
 # object library: the libraries call into it, so as an archive a linker that
 # reads in order (GNU ld) would drop it when it came before them.
@@ -194,17 +208,18 @@ if(HEARTH_BUILD_TESTS)
 
     # The GPU layer's cases that need no GPU: the render graph, the
     # pipeline cache file, the descriptor write log.
-    add_executable(hearth_rhi_tests tests/main.cpp tests/RenderGraphTests.cpp tests/PipelineCacheFileTests.cpp tests/DescriptorLogUtilTests.cpp)
+    add_executable(hearth_rhi_tests tests/main.cpp tests/RenderGraphTests.cpp tests/PipelineCacheFileTests.cpp tests/DescriptorLogUtilTests.cpp
+        tests/AppArgsTests.cpp)
     target_include_directories(hearth_rhi_tests PRIVATE "${HEARTH_HAMR_SOURCE}/include")
-    target_link_libraries(hearth_rhi_tests PRIVATE hearth_rhi hearth_default_host)
+    target_link_libraries(hearth_rhi_tests PRIVATE hearth_app hearth_default_host)
     hearth_flags(hearth_rhi_tests)
 
     # The GPU layer on a device (lavapipe in CI): an offscreen device, a
     # compute dispatch read back, the bindless retire, an offscreen
     # presenter and its clients.
-    add_executable(hearth_rhi_gpu_tests tests/main.cpp tests/RhiGpuTests.cpp tests/PresenterGpuTests.cpp)
+    add_executable(hearth_rhi_gpu_tests tests/main.cpp tests/RhiGpuTests.cpp tests/PresenterGpuTests.cpp tests/AppGpuTests.cpp)
     target_include_directories(hearth_rhi_gpu_tests PRIVATE tests "${HEARTH_HAMR_SOURCE}/include")
-    target_link_libraries(hearth_rhi_gpu_tests PRIVATE hearth_rhi hearth_default_host)
+    target_link_libraries(hearth_rhi_gpu_tests PRIVATE hearth_app hearth_default_host)
     hearth_flags(hearth_rhi_gpu_tests)
 
     add_executable(hearth_default_host_tests tests/DefaultHostTests.cpp)

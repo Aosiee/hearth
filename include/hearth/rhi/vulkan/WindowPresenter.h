@@ -25,6 +25,7 @@ namespace hearth::platform { class Window; }
 
 namespace hearth::rhi {
 
+	class CommandList;
 	class VulkanCommandList;
 	class VulkanRhiDevice;
 	class WindowPresenter;
@@ -73,9 +74,16 @@ namespace hearth::rhi {
 		hearth::platform::Window* Window() const;
 		VkExtent2D Extent() const;
 
+		// The target's size in pixels (the swapchain's, or the offscreen
+		// image's).
+		uint32_t Width() const { return Extent().width; }
+		uint32_t Height() const { return Extent().height; }
+
 		// Opens the swapchain's rendering scope in a pass's list (colour and
-		// depth loaded; the first pass clears them); the pass ends it.
+		// depth loaded; the first pass clears them); the pass ends it
+		// (CommandList::EndRendering).
 		void BeginRendering(VulkanCommandList& list, bool clear) const;
+		void BeginRendering(CommandList& list, bool clear) const;
 
 	private:
 		WindowPresenter& m_Presenter;
@@ -128,6 +136,12 @@ namespace hearth::rhi {
 		bool IsMainWindow = false;
 		uint32_t OffscreenWidth = 1280;             // the FrameUpdate size offscreen
 		uint32_t OffscreenHeight = 720;
+		// Offscreen only: the presenter owns a B8G8R8A8 colour and a D32
+		// depth image at the offscreen size, and every frame records the
+		// swapchain graph against them (the clients' RecordSwapchain draws
+		// as it does into a window; there is no acquire and no present).
+		// ReadOffscreenImage reads the colour back.
+		bool OffscreenImage = false;
 		// The program's own pointer (its per-window object), for the parks'
 		// and the main window's callers.
 		void* Owner = nullptr;
@@ -161,6 +175,12 @@ namespace hearth::rhi {
 
 		void SetVsync(bool enabled) { m_Swapchain.SetVsync(enabled); }
 
+		// The offscreen image's pixels as opaque RGBA8, row by row from the
+		// top, after the last presented frame has finished on the GPU. False
+		// without an offscreen image or before its first frame. Loop thread.
+		bool ReadOffscreenImage(std::vector<uint8_t>& outRgba);
+		bool HasOffscreenImage() const { return IsValid(m_OffscreenColour); }
+
 		// Blocks until every frame in flight is submitted (the present
 		// included) / until every frame in flight finished its record.
 		void WaitForSubmitIdle();
@@ -181,6 +201,9 @@ namespace hearth::rhi {
 		uint32_t GetWindowSlotBase() const { return m_WindowSlotBase; }
 		uint32_t GetWindowIndex() const { return m_WindowSlotBase / VulkanDevice::FramesInFlight; }
 		bool IsOffscreen() const { return m_Offscreen; }
+		// The extent the swapchain graph draws into (the swapchain's, or the
+		// offscreen image's).
+		VkExtent2D GetTargetExtent() const;
 		bool IsLoopThread() const { return m_Device->IsGameThread(); }
 		void* GetOwner() const { return m_Owner; }
 		VulkanSwapchain& GetSwapchain() { return m_Swapchain; }
@@ -249,6 +272,10 @@ namespace hearth::rhi {
 		TextureHandle m_DepthHandle;
 		VkImageLayout m_DepthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		uint64_t m_AdoptedDepthGeneration = 0;
+		// The offscreen image (OffscreenImage): the colour and its graph state
+		// carried across frames (the depth is m_DepthHandle).
+		TextureHandle m_OffscreenColour;
+		TextureState m_OffscreenColourState = TextureState::Undefined;
 
 		loom::DedicatedId m_SubmitThread = loom::kInvalidDedicated;
 		FrameSubmission m_FrameSubmissions[VulkanDevice::FramesInFlight];
