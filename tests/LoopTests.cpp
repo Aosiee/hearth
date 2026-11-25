@@ -2,9 +2,7 @@
 // counter and delta, the fixed steps and their cap, paused frames, the stop,
 // the frame cap, the zones and the refusals.
 
-#ifndef HEARTH_ENABLE_ZONES
-#define HEARTH_ENABLE_ZONES
-#endif
+// HEARTH_ENABLE_ZONES comes from hearth::core, as the library was built.
 #include "hearth/Loop.h"
 
 #include "TestHost.h"
@@ -329,7 +327,11 @@ TEST_CASE("loop: each client runs in a zone named by it unless it opts out")
 	for (const hearth::test::Call& call : hearth::test::Calls())
 		if (call.What == "begin")
 			zones.push_back(call.Text);
+#if defined(HEARTH_ENABLE_ZONES)
 	CHECK(zones == std::vector<std::string>{ "zoned" });
+#else
+	CHECK(zones.empty());
+#endif
 }
 
 TEST_CASE("loop: refusals - a taken key or name, Fixed through Add, changes inside a frame")
