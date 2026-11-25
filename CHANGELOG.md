@@ -4,7 +4,10 @@ Each release is an annotated tag (`v0.x.0`, or `v0.x.y` for a release of
 fixes only) whose message is the entry below. Versions before 1.0 may change
 the API; every entry says what callers need to change.
 
-## Unreleased
+## 0.1.0
+
+The first release: the base TinyEngine and Wisp stand on, as a library of
+its own.
 
 - The host seam (`hearth/Host.h`): logging, failed asserts, profiler zones
   and the GPU note, defined by the program at link time.
