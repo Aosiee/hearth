@@ -1,5 +1,6 @@
 #include "tepch.h"
 #include "Platform/Vulkan/Shaders/VulkanShaderReflection.h"
+#include "hearth/Zone.h"
 
 #include <spirv_cross.hpp>
 
@@ -7,7 +8,7 @@ namespace TinyEngine {
 
 	VulkanShaderReflectionInfo VulkanShaderReflection::Reflect(const std::vector<uint32_t>& spirv)
 	{
-		TE_PROFILE_FUNCTION();
+		HEARTH_ZONE_FUNCTION();
 
 		spirv_cross::Compiler compiler(spirv);
 		spirv_cross::ShaderResources resources = compiler.get_shader_resources();

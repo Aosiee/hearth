@@ -1,13 +1,16 @@
 #include "tepch.h"
 #include "Platform/Vulkan/Device/VulkanDevice.h"
+#include "hearth/Assert.h"
+#include "hearth/Log.h"
+#include "hearth/Zone.h"
+#include "hearth/Host.h"
 #include "Platform/Vulkan/Device/VulkanContext.h" // SetMainContext asserts the context's flag
 #include "TinyEngine/Profiler/GpuFrameDebugData.h"
 #include "TinyEngine/Profiler/Profiler.h"
-#include "TinyEngine/Core/Crash/CrashHandler.h"
 
 #include "loom/loom.h"
 
-#include <GLFW/glfw3.h>
+#include "hearth/platform/Window.h"
 #include <algorithm>
 #include <cstring>
 #include <thread>
@@ -67,16 +70,16 @@ namespace TinyEngine {
 			switch (severity)
 			{
 				case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
-					TE_CORE_ERROR(LogVulkan, "{0} [{1}]", callbackData->pMessage, messageId);
+					HEARTH_LOG_ERROR(::hearth::LogVulkan, "{0} [{1}]", callbackData->pMessage, messageId);
 					break;
 				case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT:
-					TE_CORE_WARN(LogVulkan, "{0} [{1}]", callbackData->pMessage, messageId);
+					HEARTH_LOG_WARN(::hearth::LogVulkan, "{0} [{1}]", callbackData->pMessage, messageId);
 					break;
 				case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT:
-					TE_CORE_INFO(LogVulkan, "{0} [{1}]", callbackData->pMessage, messageId);
+					HEARTH_LOG_INFO(::hearth::LogVulkan, "{0} [{1}]", callbackData->pMessage, messageId);
 					break;
 				default:
-					TE_CORE_DEBUG(LogVulkan, "{0} [{1}]", callbackData->pMessage, messageId);
+					HEARTH_LOG_DEBUG(::hearth::LogVulkan, "{0} [{1}]", callbackData->pMessage, messageId);
 					break;
 			}
 
@@ -92,9 +95,9 @@ namespace TinyEngine {
 
 	}
 
-	void VulkanDevice::Init(GLFWwindow* windowForExtensionQuery)
+	void VulkanDevice::Init(hearth::platform::Window* windowForExtensionQuery)
 	{
-		TE_PROFILE_FUNCTION();
+		HEARTH_ZONE_FUNCTION();
 
 		// The Offscreen mode passes no window
 		// - the surface-dependent selections below skip the present
@@ -186,7 +189,7 @@ namespace TinyEngine {
 
 	void VulkanDevice::Shutdown()
 	{
-		TE_PROFILE_FUNCTION();
+		HEARTH_ZONE_FUNCTION();
 
 		if (m_Device != VK_NULL_HANDLE)
 			vkDeviceWaitIdle(m_Device);
@@ -253,7 +256,7 @@ namespace TinyEngine {
 		return false;
 	}
 
-	void VulkanDevice::CreateInstance(GLFWwindow* windowForExtensionQuery)
+	void VulkanDevice::CreateInstance(hearth::platform::Window* windowForExtensionQuery)
 	{
 		VkApplicationInfo appInfo{};
 		appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -270,22 +273,20 @@ namespace TinyEngine {
 		// extensions are omitted entirely (the device is created
 		// display-agnostic; the NVIDIA/Mesa drivers allow this with no
 		// X/Wayland present).
-		uint32_t glfwExtensionCount = 0;
-		const char** glfwExtensions = nullptr;
 		std::vector<const char*> extensions;
 		if (windowForExtensionQuery != nullptr)
 		{
-			glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-			TE_CORE_ASSERT(glfwExtensions, "GLFW could not provide the instance extensions Vulkan surface creation needs on this platform!");
-			extensions.assign(glfwExtensions, glfwExtensions + glfwExtensionCount);
+			m_Platform = &windowForExtensionQuery->GetPlatform();
+			extensions = m_Platform->VulkanInstanceExtensions();
+			HEARTH_ASSERT(!extensions.empty(), "the window system could not provide the instance extensions Vulkan surface creation needs on this platform!");
 		}
 
-#ifdef TE_ENABLE_ASSERTS
+#ifdef HEARTH_ENABLE_ASSERTS
 		m_ValidationEnabled = CheckValidationLayerSupport();
 		if (m_ValidationEnabled)
 			extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 		else
-			TE_CORE_WARN(LogVulkan, "VK_LAYER_KHRONOS_validation is not available on this machine, running without Vulkan validation.");
+			HEARTH_LOG_WARN(::hearth::LogVulkan, "VK_LAYER_KHRONOS_validation is not available on this machine, running without Vulkan validation.");
 #endif
 
 		VkInstanceCreateInfo createInfo{};
@@ -325,7 +326,7 @@ namespace TinyEngine {
 
 		VK_CHECK(vkCreateInstance(&createInfo, nullptr, &m_Instance));
 
-		TE_CORE_INFO(LogVulkan, "Vulkan Instance Created (validation {0})", m_ValidationEnabled ? "enabled" : "disabled");
+		HEARTH_LOG_INFO(::hearth::LogVulkan, "Vulkan Instance Created (validation {0})", m_ValidationEnabled ? "enabled" : "disabled");
 	}
 
 #if !defined(TE_CONF_DIST)
@@ -349,7 +350,7 @@ namespace TinyEngine {
 	{
 		uint32_t deviceCount = 0;
 		vkEnumeratePhysicalDevices(m_Instance, &deviceCount, nullptr);
-		TE_CORE_ASSERT(deviceCount > 0, "No Vulkan capable physical devices found!");
+		HEARTH_ASSERT(deviceCount > 0, "No Vulkan capable physical devices found!");
 
 		std::vector<VkPhysicalDevice> devices(deviceCount);
 		vkEnumeratePhysicalDevices(m_Instance, &deviceCount, devices.data());
@@ -381,7 +382,7 @@ namespace TinyEngine {
 				// capability is not required (any graphics-capable queue
 				// family works).
 				const bool canPresent = !m_SurfaceEnabled
-					|| glfwGetPhysicalDevicePresentationSupport(m_Instance, device, i) == GLFW_TRUE;
+					|| m_Platform->VulkanPresentationSupport(m_Instance, device, i);
 
 				if (hasGraphics && canPresent)
 				{
@@ -402,14 +403,14 @@ namespace TinyEngine {
 			}
 		}
 
-		TE_CORE_ASSERT(bestDevice != VK_NULL_HANDLE, "Could not find a physical device supporting Vulkan 1.3 with a graphics + present capable queue!");
+		HEARTH_ASSERT(bestDevice != VK_NULL_HANDLE, "Could not find a physical device supporting Vulkan 1.3 with a graphics + present capable queue!");
 
 		m_PhysicalDevice = bestDevice;
 		m_GraphicsQueueFamily = bestQueueFamily;
 
 		VkPhysicalDeviceProperties properties;
 		vkGetPhysicalDeviceProperties(m_PhysicalDevice, &properties);
-		TE_CORE_INFO(LogVulkan, "Vulkan Physical Device: {0}", properties.deviceName);
+		HEARTH_LOG_INFO(::hearth::LogVulkan, "Vulkan Physical Device: {0}", properties.deviceName);
 		// The capture sidecar's GPU identity (the CI golden-source
 		// policy's key).
 		m_DeviceName = properties.deviceName;
@@ -419,7 +420,7 @@ namespace TinyEngine {
 		// The GPU in every crash report.
 		char driver[16];
 		std::snprintf(driver, sizeof(driver), "0x%08x", properties.driverVersion);
-		CrashHandler::SetGpu(properties.deviceName, driver);
+		::hearth::host::NoteGpu(properties.deviceName, driver);
 
 		// Needed to convert GPU timestamp query results (raw ticks) into
 		// milliseconds for the GPU frame debugger. timestampValidBits == 0 on
@@ -469,7 +470,7 @@ namespace TinyEngine {
 		}
 		if (getDomains == nullptr)
 		{
-			TE_CORE_INFO(LogVulkan, "Profiler: calibrated timestamps unsupported; the GPU lane is anchored (uncalibrated).");
+			HEARTH_LOG_INFO(::hearth::LogVulkan, "Profiler: calibrated timestamps unsupported; the GPU lane is anchored (uncalibrated).");
 			return;
 		}
 		uint32_t domainCount = 0;
@@ -487,7 +488,7 @@ namespace TinyEngine {
 		const bool hasHost = std::find(domains.begin(), domains.end(), host) != domains.end();
 		if (!hasDevice || !hasHost)
 		{
-			TE_CORE_INFO(LogVulkan, "Profiler: {} lacks the device + steady-clock domains; the GPU lane is anchored (uncalibrated).", m_CalibrationExtension);
+			HEARTH_LOG_INFO(::hearth::LogVulkan, "Profiler: {} lacks the device + steady-clock domains; the GPU lane is anchored (uncalibrated).", m_CalibrationExtension);
 			m_CalibrationExtension = nullptr;
 			return;
 		}
@@ -543,7 +544,7 @@ namespace TinyEngine {
 		}
 		else
 		{
-			TE_CORE_INFO(LogVulkan, "Profiler: GPU timestamps calibrated ({}, max deviation {} ns).", m_CalibrationExtension, maxDeviation);
+			HEARTH_LOG_INFO(::hearth::LogVulkan, "Profiler: GPU timestamps calibrated ({}, max deviation {} ns).", m_CalibrationExtension, maxDeviation);
 		}
 		if (m_GpuPeriodEstimate > 0.0)
 			next.PeriodNs = m_GpuPeriodEstimate;
@@ -714,7 +715,7 @@ namespace TinyEngine {
 
 		if (!m_TimestampsSupported)
 		{
-			TE_CORE_WARN(LogVulkan, "This GPU's graphics queue doesn't report timestampValidBits, the GPU frame debugger's pass timings will stay unavailable.");
+			HEARTH_LOG_WARN(::hearth::LogVulkan, "This GPU's graphics queue doesn't report timestampValidBits, the GPU frame debugger's pass timings will stay unavailable.");
 			return;
 		}
 
@@ -743,7 +744,7 @@ namespace TinyEngine {
 		uint32_t slot = 0;
 		while (slot < MaxWindowSlots && m_WindowSlotClaimed[slot])
 			slot++;
-		TE_CORE_ASSERT(slot < MaxWindowSlots, "More live windows than VulkanDevice::MaxWindowSlots allows!");
+		HEARTH_ASSERT(slot < MaxWindowSlots, "More live windows than VulkanDevice::MaxWindowSlots allows!");
 		m_WindowSlotClaimed[slot] = true;
 		m_WindowContexts[slot] = owner;
 		return slot * FramesInFlight;
@@ -752,15 +753,15 @@ namespace TinyEngine {
 	void VulkanDevice::ReleaseWindowSlot(uint32_t slotBase)
 	{
 		const uint32_t slot = slotBase / FramesInFlight;
-		TE_CORE_ASSERT(slot < MaxWindowSlots, "ReleaseWindowSlot with an out-of-range slot base");
+		HEARTH_ASSERT(slot < MaxWindowSlots, "ReleaseWindowSlot with an out-of-range slot base");
 		m_WindowContexts[slot] = nullptr;
 	}
 
 	void VulkanDevice::RecycleWindowSlot(uint32_t slotBase)
 	{
 		const uint32_t slot = slotBase / FramesInFlight;
-		TE_CORE_ASSERT(slot < MaxWindowSlots, "RecycleWindowSlot with an out-of-range slot base");
-		TE_CORE_ASSERT(m_WindowContexts[slot] == nullptr, "RecycleWindowSlot before ReleaseWindowSlot");
+		HEARTH_ASSERT(slot < MaxWindowSlots, "RecycleWindowSlot with an out-of-range slot base");
+		HEARTH_ASSERT(m_WindowContexts[slot] == nullptr, "RecycleWindowSlot before ReleaseWindowSlot");
 		m_WindowSlotClaimed[slot] = false;
 	}
 
@@ -771,29 +772,29 @@ namespace TinyEngine {
 		// overwrite. The context must be the one created with
 		// WindowProps::IsMainWindow (not "owns window slot 0") and live in
 		// the window-slot table (it allocated its slot first).
-		TE_CORE_ASSERT(m_MainContext == nullptr, "SetMainContext called twice - the main context is set exactly once");
-		TE_CORE_ASSERT(context != nullptr && context->IsMainWindow(), "SetMainContext from a context not created as the main window (WindowProps::IsMainWindow)");
-		TE_CORE_ASSERT(std::find(m_WindowContexts.begin(), m_WindowContexts.end(), context) != m_WindowContexts.end(),
+		HEARTH_ASSERT(m_MainContext == nullptr, "SetMainContext called twice - the main context is set exactly once");
+		HEARTH_ASSERT(context != nullptr && context->IsMainWindow(), "SetMainContext from a context not created as the main window (WindowProps::IsMainWindow)");
+		HEARTH_ASSERT(std::find(m_WindowContexts.begin(), m_WindowContexts.end(), context) != m_WindowContexts.end(),
 			"SetMainContext from a context that holds no live window slot (it must allocate its slot first)");
 		m_MainContext = context;
 	}
 
 	void VulkanDevice::ClearMainContext(VulkanContext* context)
 	{
-		TE_CORE_ASSERT(m_MainContext == context, "ClearMainContext from a context that is not the main context");
+		HEARTH_ASSERT(m_MainContext == context, "ClearMainContext from a context that is not the main context");
 		m_MainContext = nullptr;
 	}
 
 	VulkanContext& VulkanDevice::GetMainContext() const
 	{
-		TE_CORE_ASSERT(m_MainContext != nullptr, "GetMainContext() with no main context - the main window's context must exist in windowed flavors");
+		HEARTH_ASSERT(m_MainContext != nullptr, "GetMainContext() with no main context - the main window's context must exist in windowed flavors");
 		return *m_MainContext;
 	}
 
 	void VulkanDevice::AssertGameThread(const char* entryPoint) const
 	{
 		(void)entryPoint;
-		TE_CORE_ASSERT(IsGameThread(), std::string("VulkanDevice::") + entryPoint + " off the game thread - the transient pool and the upload batch are game-thread-only");
+		HEARTH_ASSERT(IsGameThread(), std::string("VulkanDevice::") + entryPoint + " off the game thread - the transient pool and the upload batch are game-thread-only");
 	}
 
 	VkCommandBuffer VulkanDevice::BeginSingleTimeCommands()
@@ -830,7 +831,7 @@ namespace TinyEngine {
 		// The batch owns the end + submit for its own buffer.
 		if (m_UploadBatch.Buffer != VK_NULL_HANDLE)
 		{
-			TE_CORE_ASSERT(commandBuffer == m_UploadBatch.Buffer, "an upload outside the batch ended inside it");
+			HEARTH_ASSERT(commandBuffer == m_UploadBatch.Buffer, "an upload outside the batch ended inside it");
 			return;
 		}
 
@@ -873,7 +874,7 @@ namespace TinyEngine {
 	void VulkanDevice::BeginUploadBatch()
 	{
 		AssertGameThread("BeginUploadBatch");
-		TE_CORE_ASSERT(m_UploadBatch.Buffer == VK_NULL_HANDLE, "an upload batch is already active");
+		HEARTH_ASSERT(m_UploadBatch.Buffer == VK_NULL_HANDLE, "an upload batch is already active");
 
 		// Reclaim the previous batch's submitted buffers + retired staging
 		// once the GPU has passed its submission (conservative: everything
@@ -1011,7 +1012,7 @@ namespace TinyEngine {
 
 		if (m_TimestampsSupported)
 		{
-			TE_CORE_ASSERT(frameSlot < TotalFrameSlots, "CmdBeginDebugLabel frame index out of range!");
+			HEARTH_ASSERT(frameSlot < TotalFrameSlots, "CmdBeginDebugLabel frame index out of range!");
 
 			// T-F-B.3: the slot counter is per frame + atomic (the parallel
 			// record workers allocate concurrently); fetch_add keeps the used
@@ -1052,7 +1053,7 @@ namespace TinyEngine {
 #if !defined(TE_CONF_DIST)
 		if (m_TimestampsSupported)
 		{
-			TE_CORE_ASSERT(frameSlot < TotalFrameSlots, "CmdEndDebugLabel frame index out of range!");
+			HEARTH_ASSERT(frameSlot < TotalFrameSlots, "CmdEndDebugLabel frame index out of range!");
 
 			size_t threadKey = (size_t)frameSlot * m_RecordThreadCount + RecordThreadIndex();
 
@@ -1101,7 +1102,7 @@ namespace TinyEngine {
 
 	void VulkanDevice::BeginProfilingFrame(uint32_t frameIndex, bool isMainWindow)
 	{
-		TE_CORE_ASSERT(frameIndex < TotalFrameSlots, "BeginProfilingFrame frame index out of range!");
+		HEARTH_ASSERT(frameIndex < TotalFrameSlots, "BeginProfilingFrame frame index out of range!");
 #if !defined(TE_CONF_DIST)
 		GpuFrameDebugSink::Writer debug = GetGpuFrameDebugSink().Write();
 		GpuFrameDebugInfo& debugInfo = debug.Info;
@@ -1216,7 +1217,7 @@ namespace TinyEngine {
 		// The dev assert catches the pool-count mismatch the silent clamp
 		// used to hide (two threads sharing one pool); the clamp stays
 		// the release-only fallback.
-		TE_CORE_ASSERT((uint32_t)index < m_RecordThreadCount,
+		HEARTH_ASSERT((uint32_t)index < m_RecordThreadCount,
 			"the loom thread index exceeds the record pool count");
 		return (uint32_t)index < m_RecordThreadCount ? (uint32_t)index : m_RecordThreadCount - 1;
 	}
@@ -1225,7 +1226,7 @@ namespace TinyEngine {
 	void VulkanDevice::NoteTimestampOverflow()
 	{
 		if (!m_TimestampOverflowWarned.exchange(true, std::memory_order_relaxed))
-			TE_CORE_WARN(LogVulkan, "GPU timestamps: a frame recorded more than {0} timed scopes - the extra scopes keep their labels but go untimed (warned once).",
+			HEARTH_LOG_WARN(::hearth::LogVulkan, "GPU timestamps: a frame recorded more than {0} timed scopes - the extra scopes keep their labels but go untimed (warned once).",
 				kMaxTimestampsPerFrame / 2);
 	}
 #endif // !TE_CONF_DIST

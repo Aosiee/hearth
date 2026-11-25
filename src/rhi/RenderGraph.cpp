@@ -1,5 +1,6 @@
 #include "tepch.h"
 #include "TinyEngine/RenderGraph/RenderGraph.h"
+#include "hearth/Assert.h"
 
 #include <algorithm>
 
@@ -36,7 +37,7 @@ namespace rg {
 	TextureHandle TransientTexturePool::GetHandle(uint64_t key) const
 	{
 		auto it = m_Entries.find(key);
-		TE_CORE_ASSERT(it != m_Entries.end() && IsValid(it->second.Handle),
+		HEARTH_ASSERT(it != m_Entries.end() && IsValid(it->second.Handle),
 			"RecordPass resolved a transient that PreCreateTransients never created - the threaded host must pre-create transients before the fan-out!");
 		return it->second.Handle;
 	}
@@ -101,7 +102,7 @@ namespace rg {
 
 	RGTexture RenderGraph::PassBuilder::Read(RGTexture texture, TextureState state)
 	{
-		TE_CORE_ASSERT(texture.Valid(), "reading an invalid virtual texture");
+		HEARTH_ASSERT(texture.Valid(), "reading an invalid virtual texture");
 		AccessRecord access;
 		access.Index = texture.Index;
 		access.State = state;
@@ -112,7 +113,7 @@ namespace rg {
 
 	RGTexture RenderGraph::PassBuilder::Write(RGTexture texture, TextureState state)
 	{
-		TE_CORE_ASSERT(texture.Valid(), "writing an invalid virtual texture");
+		HEARTH_ASSERT(texture.Valid(), "writing an invalid virtual texture");
 		AccessRecord access;
 		access.Index = texture.Index;
 		access.State = state;
@@ -123,7 +124,7 @@ namespace rg {
 
 	RGBuffer RenderGraph::PassBuilder::Read(RGBuffer buffer, BufferState state)
 	{
-		TE_CORE_ASSERT(buffer.Valid(), "reading an invalid virtual buffer");
+		HEARTH_ASSERT(buffer.Valid(), "reading an invalid virtual buffer");
 		AccessRecord access;
 		access.IsBuffer = true;
 		access.Index = buffer.Index;
@@ -135,7 +136,7 @@ namespace rg {
 
 	RGBuffer RenderGraph::PassBuilder::Write(RGBuffer buffer, BufferState state)
 	{
-		TE_CORE_ASSERT(buffer.Valid(), "writing an invalid virtual buffer");
+		HEARTH_ASSERT(buffer.Valid(), "writing an invalid virtual buffer");
 		AccessRecord access;
 		access.IsBuffer = true;
 		access.Index = buffer.Index;
@@ -311,7 +312,7 @@ namespace rg {
 			}
 		}
 
-		TE_CORE_ASSERT(m_Order.size() == live.size(), "RenderGraph contains a dependency cycle - the graph must be acyclic");
+		HEARTH_ASSERT(m_Order.size() == live.size(), "RenderGraph contains a dependency cycle - the graph must be acyclic");
 
 		// ---- Barrier derivation: walk the ordered accesses per texture,
 		// tracking state; a state change between consecutive users is a
@@ -400,7 +401,7 @@ namespace rg {
 
 	BufferState RenderGraph::GetFinalState(RGBuffer buffer) const
 	{
-		TE_CORE_ASSERT(buffer.Valid(), "querying an invalid virtual buffer");
+		HEARTH_ASSERT(buffer.Valid(), "querying an invalid virtual buffer");
 		if (buffer.Index < m_FinalBufferStates.size())
 			return m_FinalBufferStates[buffer.Index];
 		return m_Buffers[buffer.Index].State;
@@ -408,7 +409,7 @@ namespace rg {
 
 	TextureState RenderGraph::GetFinalState(RGTexture texture) const
 	{
-		TE_CORE_ASSERT(texture.Valid(), "querying an invalid virtual texture");
+		HEARTH_ASSERT(texture.Valid(), "querying an invalid virtual texture");
 		if (!m_FinalStates.empty() && texture.Index < m_FinalStates.size())
 			return m_FinalStates[texture.Index];
 		return m_Textures[texture.Index].State;

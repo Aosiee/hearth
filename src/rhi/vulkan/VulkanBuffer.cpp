@@ -1,5 +1,6 @@
 #include "tepch.h"
 #include "Platform/Vulkan/Resources/VulkanBuffer.h"
+#include "hearth/Assert.h"
 
 namespace TinyEngine {
 
@@ -47,15 +48,15 @@ namespace TinyEngine {
 
 	void VulkanBuffer::SetData(const void* data, VkDeviceSize size, VkDeviceSize offset)
 	{
-		TE_CORE_ASSERT(m_MappedData, "VulkanBuffer::SetData called on a buffer that isn't host visible, use UploadViaStaging instead!");
-		TE_CORE_ASSERT(offset + size <= m_Size, "VulkanBuffer::SetData would write past the end of the buffer!");
+		HEARTH_ASSERT(m_MappedData, "VulkanBuffer::SetData called on a buffer that isn't host visible, use UploadViaStaging instead!");
+		HEARTH_ASSERT(offset + size <= m_Size, "VulkanBuffer::SetData would write past the end of the buffer!");
 
 		memcpy((uint8_t*)m_MappedData + offset, data, (size_t)size);
 	}
 
 	void VulkanBuffer::UploadViaStaging(const void* data, VkDeviceSize size)
 	{
-		TE_CORE_ASSERT(size <= m_Size, "VulkanBuffer::UploadViaStaging would write past the end of the buffer!");
+		HEARTH_ASSERT(size <= m_Size, "VulkanBuffer::UploadViaStaging would write past the end of the buffer!");
 
 		VulkanBuffer staging;
 		staging.Init(*m_Device, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, /*hostVisible*/ true, "Staging Buffer (transient upload)");

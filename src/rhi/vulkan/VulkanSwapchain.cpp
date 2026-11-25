@@ -1,17 +1,21 @@
 #include "tepch.h"
 #include "Platform/Vulkan/Device/VulkanSwapchain.h"
+#include "hearth/Assert.h"
+#include "hearth/Log.h"
+#include "hearth/Zone.h"
 
 #include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
 
-#include <GLFW/glfw3.h>
+#include "hearth/platform/Window.h"
 
 namespace TinyEngine {
 
-	void VulkanSwapchain::Init(VulkanDevice& device, GLFWwindow* window)
+	void VulkanSwapchain::Init(VulkanDevice& device, rhi::VulkanRhiDevice& rhiDevice, hearth::platform::Window* window)
 	{
-		TE_PROFILE_FUNCTION();
+		HEARTH_ZONE_FUNCTION();
 
 		m_Device = &device;
+		m_RhiDevice = &rhiDevice;
 		m_Window = window;
 
 		CreateSurface(window);
@@ -22,7 +26,7 @@ namespace TinyEngine {
 		CreateTransitionCommandPool();
 
 		int width, height;
-		glfwGetFramebufferSize(window, &width, &height);
+		std::tie(width, height) = window->FramebufferSize();
 		CreateSwapchain((uint32_t)width, (uint32_t)height);
 		CreateImageViews();
 		CreateSyncObjects();
@@ -54,7 +58,7 @@ namespace TinyEngine {
 
 	void VulkanSwapchain::Shutdown()
 	{
-		TE_PROFILE_FUNCTION();
+		HEARTH_ZONE_FUNCTION();
 
 		if (m_Device == nullptr)
 			return; // idempotent: the destructor runs this after an explicit Shutdown
@@ -85,13 +89,13 @@ namespace TinyEngine {
 		m_Device = nullptr;
 	}
 
-	void VulkanSwapchain::CreateSurface(GLFWwindow* window)
+	void VulkanSwapchain::CreateSurface(hearth::platform::Window* window)
 	{
-		VK_CHECK(glfwCreateWindowSurface(m_Device->GetInstance(), window, nullptr, &m_Surface));
+		VK_CHECK((VkResult)window->CreateVulkanSurface(m_Device->GetInstance(), nullptr, &m_Surface));
 
 		VkBool32 presentSupported = VK_FALSE;
 		vkGetPhysicalDeviceSurfaceSupportKHR(m_Device->GetPhysicalDevice(), m_Device->GetGraphicsQueueFamily(), m_Surface, &presentSupported);
-		TE_CORE_ASSERT(presentSupported, "The graphics queue family chosen at device creation cannot present to this window's surface!");
+		HEARTH_ASSERT(presentSupported, "The graphics queue family chosen at device creation cannot present to this window's surface!");
 	}
 
 	VkSurfaceFormatKHR VulkanSwapchain::ChooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& available) const
@@ -261,7 +265,7 @@ namespace TinyEngine {
 
 		CreateDepthResources();
 
-		TE_CORE_INFO(LogVulkan, "Vulkan Swapchain Created: {0}x{1}, {2} images, present mode {3}", extent.width, extent.height, actualImageCount, (int)presentMode);
+		HEARTH_LOG_INFO(::hearth::LogVulkan, "Vulkan Swapchain Created: {0}x{1}, {2} images, present mode {3}", extent.width, extent.height, actualImageCount, (int)presentMode);
 	}
 
 	void VulkanSwapchain::CreateDepthResources()
@@ -319,7 +323,7 @@ namespace TinyEngine {
 		depthSamplerCreateInfo.maxLod = 0.0f;
 		VK_CHECK(vkCreateSampler(m_Device->GetDevice(), &depthSamplerCreateInfo, nullptr, &m_DepthSampler));
 
-		rhi::VulkanRhiDevice& rhiDevice = GetVulkanRhiDevice();
+		rhi::VulkanRhiDevice& rhiDevice = *m_RhiDevice;
 		m_DepthBindlessIndex = rhiDevice.AllocateBindlessTextureIndex();
 		// SHADER_READ_ONLY_OPTIMAL, matching the framebuffer's own depth
 		// descriptor + the graph's ShaderRead state (the one sampled layout
@@ -426,7 +430,7 @@ namespace TinyEngine {
 		// only barriers it).
 		{
 			m_ImageHandles.clear();
-			rhi::Device& rhiDevice = GetVulkanRhiDevice();
+			rhi::Device& rhiDevice = *m_RhiDevice;
 			for (size_t i = 0; i < m_Images.size(); i++)
 				m_ImageHandles.push_back(rhiDevice.AdoptExternalImage((void*)m_Images[i]));
 		}
@@ -490,7 +494,7 @@ namespace TinyEngine {
 		// RHI device to still be alive - the window (and this swapchain)
 		// dies before Engine::Shutdown tears the device down.
 		{
-			rhi::Device& rhiDevice = GetVulkanRhiDevice();
+			rhi::Device& rhiDevice = *m_RhiDevice;
 			for (rhi::TextureHandle handle : m_ImageHandles)
 			{
 				if (rhi::IsValid(handle))
@@ -504,7 +508,7 @@ namespace TinyEngine {
 		// instead of destroying synchronously.
 		if (m_DepthImage != VK_NULL_HANDLE)
 		{
-			rhi::VulkanRhiDevice& rhiDevice = GetVulkanRhiDevice();
+			rhi::VulkanRhiDevice& rhiDevice = *m_RhiDevice;
 			// One extra submission before the destroy - the frames recorded
 			// against this depth hold command buffers that reset at the
 			// next frame's pool reset; destroying at the GPU-completion
@@ -547,7 +551,7 @@ namespace TinyEngine {
 
 	void VulkanSwapchain::Recreate(uint32_t width, uint32_t height)
 	{
-		TE_PROFILE_FUNCTION();
+		HEARTH_ZONE_FUNCTION();
 
 		if (width == 0 || height == 0)
 			return;
@@ -568,7 +572,7 @@ namespace TinyEngine {
 
 	VulkanSwapchain::AcquireResult VulkanSwapchain::AcquireNextImage(uint32_t frameIndex, uint32_t& outImageIndex)
 	{
-		TE_PROFILE_FUNCTION();
+		HEARTH_ZONE_FUNCTION();
 
 		VkDevice device = m_Device->GetDevice();
 
@@ -576,7 +580,7 @@ namespace TinyEngine {
 		// before its command pool/buffer is reused (the timeline replaces
 		// the old per-frame fence).
 		{
-			TE_PROFILE_SCOPE("Acquire: frame-slot timeline wait");
+			HEARTH_ZONE("Acquire: frame-slot timeline wait");
 			m_Device->WaitForTimelineValue(m_FrameLastValues[frameIndex].load());
 		}
 
@@ -587,7 +591,7 @@ namespace TinyEngine {
 		while (result == VK_TIMEOUT || result == VK_NOT_READY)
 		{
 			{
-				TE_PROFILE_SCOPE("Acquire: vkAcquireNextImageKHR");
+				HEARTH_ZONE("Acquire: vkAcquireNextImageKHR");
 				result = vkAcquireNextImageKHR(device, m_Swapchain, kAcquireTimeoutNs, m_ImageAvailableSemaphores[frameIndex], VK_NULL_HANDLE, &outImageIndex);
 			}
 			if ((result == VK_TIMEOUT || result == VK_NOT_READY) && IsShutdownRequested())
@@ -604,18 +608,18 @@ namespace TinyEngine {
 
 		if (result == VK_ERROR_SURFACE_LOST_KHR)
 		{
-			TE_CORE_WARN(LogVulkan, "vkAcquireNextImageKHR lost the surface - skipping this frame.");
+			HEARTH_LOG_WARN(::hearth::LogVulkan, "vkAcquireNextImageKHR lost the surface - skipping this frame.");
 			return AcquireResult::ShuttingDown;
 		}
 
-		TE_CORE_ASSERT(result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR, "vkAcquireNextImageKHR failed unexpectedly!");
+		HEARTH_ASSERT(result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR, "vkAcquireNextImageKHR failed unexpectedly!");
 
 		// If a previous frame in flight is still using this exact image (can
 		// happen once the swapchain has more images than frames in flight), wait
 		// for it before writing over resources it might still be reading from.
 		if (m_ImagesInFlight[outImageIndex] != 0)
 		{
-			TE_PROFILE_SCOPE("Acquire: image-reuse timeline wait");
+			HEARTH_ZONE("Acquire: image-reuse timeline wait");
 			m_Device->WaitForTimelineValue(m_ImagesInFlight[outImageIndex]);
 		}
 
@@ -629,7 +633,7 @@ namespace TinyEngine {
 
 	void VulkanSwapchain::SubmitAndPresent(uint32_t frameIndex, uint32_t imageIndex, const std::vector<VkCommandBuffer>& commandBuffers)
 	{
-		TE_PROFILE_FUNCTION();
+		HEARTH_ZONE_FUNCTION();
 
 		VkSemaphore waitSemaphores[] = { m_ImageAvailableSemaphores[frameIndex] };
 		// The graph's first swapchain barrier chains with this wait through

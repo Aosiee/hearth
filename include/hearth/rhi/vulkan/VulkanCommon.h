@@ -28,7 +28,17 @@
 
 #include <string>
 
+#include "hearth/Assert.h"
+#include "hearth/Log.h"
 #include "TinyEngine/Core/Log.h"
+
+namespace hearth {
+
+	// The GPU layer's category (Hearth's log; the engine's host routes it
+	// to the engine's LogVulkan below, the same category by name).
+	HEARTH_LOG_CATEGORY(LogVulkan)
+
+}
 
 namespace TinyEngine {
 
@@ -64,8 +74,8 @@ namespace TinyEngine {
 	{
 		if (result != VK_SUCCESS)
 		{
-			TE_CORE_ERROR(LogVulkan, "Vulkan call failed: {0} returned {1} ({2}:{3})", expression, (int)result, file, line);
-			TE_CORE_ASSERT(false, "Vulkan call failed, see error above.");
+			HEARTH_LOG_ERROR(::hearth::LogVulkan, "Vulkan call failed: {0} returned {1} ({2}:{3})", expression, (int)result, file, line);
+			HEARTH_ASSERT(false, "Vulkan call failed, see error above.");
 		}
 	}
 

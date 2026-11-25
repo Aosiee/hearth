@@ -1,14 +1,17 @@
 #pragma once
 
 #include "Platform/Vulkan/VulkanCommon.h"
+#include "hearth/Assert.h"
 #include "Platform/Vulkan/Device/VulkanDevice.h"
 #include "TinyEngine/RHI/RHI.h"
 
 #include <atomic>
 
-struct GLFWwindow;
+namespace hearth::platform { class Window; }
 
 namespace TinyEngine {
+
+	namespace rhi { class VulkanRhiDevice; }
 
 	// Owns the window's VkSurfaceKHR, its VkSwapchainKHR, and the sync objects
 	// needed to safely acquire and present images. One of these exists per
@@ -18,7 +21,7 @@ namespace TinyEngine {
 	class VulkanSwapchain
 	{
 	public:
-		void Init(VulkanDevice& device, GLFWwindow* window);
+		void Init(VulkanDevice& device, rhi::VulkanRhiDevice& rhiDevice, hearth::platform::Window* window);
 		void Shutdown();
 		// Self-cleaning: the RHI owns swapchains in a handle table whose
 		// clear path destroys objects directly, so the destructor must
@@ -109,7 +112,7 @@ namespace TinyEngine {
 		// barrier-target handle (the RenderGraph imports it per frame).
 		TinyEngine::rhi::TextureHandle GetImageHandle(uint32_t index) const
 		{
-			TE_CORE_ASSERT(index < m_ImageHandles.size(), "swapchain image index out of range");
+			HEARTH_ASSERT(index < m_ImageHandles.size(), "swapchain image index out of range");
 			return m_ImageHandles[index];
 		}
 
@@ -142,7 +145,7 @@ namespace TinyEngine {
 		uint64_t GetFrameSubmitValue(uint32_t frameIndex) const { return m_FrameLastValues[frameIndex].load(); }
 
 	private:
-		void CreateSurface(GLFWwindow* window);
+		void CreateSurface(hearth::platform::Window* window);
 		void CreateSwapchain(uint32_t width, uint32_t height);
 		void CreateImageViews();
 		void CreateSyncObjects();
@@ -162,7 +165,8 @@ namespace TinyEngine {
 
 	private:
 		VulkanDevice* m_Device = nullptr;
-		GLFWwindow* m_Window = nullptr;
+		rhi::VulkanRhiDevice* m_RhiDevice = nullptr;
+		hearth::platform::Window* m_Window = nullptr;
 
 		VkSurfaceKHR m_Surface = VK_NULL_HANDLE;
 		VkSwapchainKHR m_Swapchain = VK_NULL_HANDLE;

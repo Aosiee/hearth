@@ -22,7 +22,7 @@
 #include <vector>
 #include <atomic>
 
-struct GLFWwindow;
+namespace hearth::platform { class Window; }
 
 namespace TinyEngine {
 namespace rhi {
@@ -140,7 +140,11 @@ namespace rhi {
 		// The device lifecycle: lazy on first window (the window is needed
 		// for GLFW's instance-extension query), destroyed by the subsystem
 		// on shutdown.
-		void EnsureDevice(GLFWwindow* windowForExtensionQuery);
+		void EnsureDevice(hearth::platform::Window* windowForExtensionQuery);
+		// Whether the driver pipeline cache persists to
+		// saved/cache/pipeline.bin: read when the device is created
+		// (loaded) and when it shuts down (written).
+		void SetPipelineCacheFile(bool enabled) { m_PipelineCacheFile = enabled; }
 		void ShutdownDevice();
 		VulkanDevice* GetVulkan() { return &m_Vulkan; }
 
@@ -593,10 +597,11 @@ namespace rhi {
 		void CreatePipelineCache();
 		void SavePipelineCache();
 
-		// The on-disk driver pipeline cache
-		// (saved/cache/pipeline.bin, gated by
-		// r.shader.pipelineCacheFile).
+		// The on-disk driver pipeline cache (saved/cache/pipeline.bin):
+		// whether to load it at creation and write it at shutdown, which
+		// the host sets before each (SetPipelineCacheFile).
 		VkPipelineCache m_VkPipelineCache = VK_NULL_HANDLE;
+		bool m_PipelineCacheFile = true;
 		Table<CommandListHandle, VulkanCommandList> m_CommandLists;
 		Table<SwapchainHandle, VulkanSwapchain> m_Swapchains;
 

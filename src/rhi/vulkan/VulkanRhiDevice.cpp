@@ -1,14 +1,12 @@
 #include "tepch.h"
 #include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
+#include "hearth/Assert.h"
+#include "hearth/Log.h"
 #include "Platform/Vulkan/RHI/DescriptorLogUtil.h"
 #include "Platform/Vulkan/RHI/PipelineCacheFile.h"
 #include "Platform/Vulkan/Shaders/VulkanShaderReflection.h"
 #include "Platform/Vulkan/Device/VulkanContext.h" // the main context's GetCurrentFrameSlot (the retire queue's slot tag)
 
-#include "TinyEngine/Core/Log.h"
-#include "TinyEngine/Core/Application.h"
-#include "TinyEngine/RHI/RhiDevice.h"
-#include "TinyEngine/CVar/EngineCVars.h"
 #include <blake3.h>
 
 #include <algorithm>
@@ -16,15 +14,6 @@
 #include <fstream>
 
 namespace TinyEngine {
-
-	rhi::VulkanRhiDevice& GetVulkanRhiDevice()
-	{
-		Application* app = Application::TryGet();
-		TE_CORE_ASSERT(app, "GetVulkanRhiDevice() ran before the Application (and its Engine) exists!");
-		RhiDevice& rhi = app->GetEngine().Get<RhiDevice>();
-		rhi.EnsureDevice(nullptr); // ASSERTS if called before the first window created the device (the guard)
-		return static_cast<rhi::VulkanRhiDevice&>(rhi.Get());
-	}
 
 namespace rhi {
 
@@ -275,7 +264,7 @@ namespace rhi {
 	VulkanCommandList::VulkanCommandList(VulkanRhiDevice* device, VkCommandBuffer commandBuffer, uint32_t frameSlot)
 		: CommandList(frameSlot), m_Device(device), m_CommandBuffer(commandBuffer)
 	{
-		TE_CORE_ASSERT(frameSlot < VulkanDevice::TotalFrameSlots, "a command list constructed with an out-of-range frame slot");
+		HEARTH_ASSERT(frameSlot < VulkanDevice::TotalFrameSlots, "a command list constructed with an out-of-range frame slot");
 	}
 
 	void VulkanCommandList::Begin()
@@ -425,9 +414,9 @@ namespace rhi {
 		// update the set concurrently with the sibling workers' binds and
 		// draws on the same set (a host-access race the driver's bind path
 		// then crashes on).
-		TE_CORE_ASSERT(m_BoundLayout != VK_NULL_HANDLE, "BindGlobalSet called before BindPipeline");
+		HEARTH_ASSERT(m_BoundLayout != VK_NULL_HANDLE, "BindGlobalSet called before BindPipeline");
 		const uint32_t slot = FrameSlot();
-		TE_CORE_ASSERT(slot < VulkanDevice::TotalFrameSlots, "BindGlobalSet with an out-of-range record frame slot");
+		HEARTH_ASSERT(slot < VulkanDevice::TotalFrameSlots, "BindGlobalSet with an out-of-range record frame slot");
 		VkDescriptorSet set = m_Device->GetGlobalDescriptorSet(slot);
 		vkCmdBindDescriptorSets(m_CommandBuffer, m_BoundBindPoint, m_BoundLayout, 0, 1, &set, 0, nullptr);
 	}
@@ -554,7 +543,7 @@ namespace rhi {
 		m_Buffers.Clear();
 	}
 
-	void VulkanRhiDevice::EnsureDevice(GLFWwindow* windowForExtensionQuery)
+	void VulkanRhiDevice::EnsureDevice(hearth::platform::Window* windowForExtensionQuery)
 	{
 		if (m_Initialized)
 			return;
@@ -583,7 +572,7 @@ namespace rhi {
 		VkPipelineCacheCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
 		std::vector<uint8_t> cached;
-		if (TinyEngine::cvars::r_shader_pipelineCacheFile.Get())
+		if (m_PipelineCacheFile)
 		{
 			std::ifstream file(kPipelineCachePath, std::ios::binary);
 			if (file.is_open())
@@ -599,14 +588,14 @@ namespace rhi {
 					info.pInitialData = payload;
 				}
 				else
-					TE_CORE_WARN(LogVulkan, "Pipeline cache: ignoring {0} ({1}), cold start.",
+					HEARTH_LOG_WARN(::hearth::LogVulkan, "Pipeline cache: ignoring {0} ({1}), cold start.",
 						kPipelineCachePath, PipelineCacheFileStatusName(status));
 			}
 		}
 		VkResult result = vkCreatePipelineCache(m_Vulkan.GetDevice(), &info, nullptr, &m_VkPipelineCache);
 		if (result != VK_SUCCESS && info.initialDataSize != 0)
 		{
-			TE_CORE_WARN(LogVulkan, "Pipeline cache: the driver refused {0} (VkResult {1}), cold start.",
+			HEARTH_LOG_WARN(::hearth::LogVulkan, "Pipeline cache: the driver refused {0} (VkResult {1}), cold start.",
 				kPipelineCachePath, (int)result);
 			info.initialDataSize = 0;
 			info.pInitialData = nullptr;
@@ -619,7 +608,7 @@ namespace rhi {
 	{
 		if (m_VkPipelineCache == VK_NULL_HANDLE)
 			return;
-		if (!TinyEngine::cvars::r_shader_pipelineCacheFile.Get())
+		if (!m_PipelineCacheFile)
 		{
 			vkDestroyPipelineCache(m_Vulkan.GetDevice(), m_VkPipelineCache, nullptr);
 			m_VkPipelineCache = VK_NULL_HANDLE;
@@ -634,7 +623,7 @@ namespace rhi {
 		m_VkPipelineCache = VK_NULL_HANDLE;
 		if (!WritePipelineCacheFileAtomic(kPipelineCachePath,
 			BuildPipelineCacheFile(blob.data(), size, QueryPipelineCacheIdentity(m_Vulkan.GetPhysicalDevice()))))
-			TE_CORE_WARN(LogVulkan, "Pipeline cache: could not write {0}, the next launch is a cold start.", kPipelineCachePath);
+			HEARTH_LOG_WARN(::hearth::LogVulkan, "Pipeline cache: could not write {0}, the next launch is a cold start.", kPipelineCachePath);
 	}
 
 	// The two fixed samplers Wisp picks from. Baked with Wisp's EXACT
@@ -905,13 +894,13 @@ namespace rhi {
 		properties2.pNext = &indexingProperties;
 		vkGetPhysicalDeviceProperties2(m_Vulkan.GetPhysicalDevice(), &properties2);
 
-		TE_CORE_ASSERT(indexingProperties.maxDescriptorSetUpdateAfterBindSampledImages >= kBindlessTextures,
+		HEARTH_ASSERT(indexingProperties.maxDescriptorSetUpdateAfterBindSampledImages >= kBindlessTextures,
 			"the device's update-after-bind sampled-image capacity is below the bindless texture array");
-		TE_CORE_ASSERT(indexingProperties.maxPerStageDescriptorUpdateAfterBindSampledImages >= kBindlessTextures,
+		HEARTH_ASSERT(indexingProperties.maxPerStageDescriptorUpdateAfterBindSampledImages >= kBindlessTextures,
 			"the device's per-stage update-after-bind sampled-image capacity is below the bindless texture array");
-		TE_CORE_ASSERT(indexingProperties.maxDescriptorSetUpdateAfterBindStorageBuffers >= kBindlessBuffers,
+		HEARTH_ASSERT(indexingProperties.maxDescriptorSetUpdateAfterBindStorageBuffers >= kBindlessBuffers,
 			"the device's update-after-bind storage-buffer capacity is below the bindless buffer array");
-		TE_CORE_ASSERT(indexingProperties.maxPerStageDescriptorUpdateAfterBindStorageBuffers >= kBindlessBuffers,
+		HEARTH_ASSERT(indexingProperties.maxPerStageDescriptorUpdateAfterBindStorageBuffers >= kBindlessBuffers,
 			"the device's per-stage update-after-bind storage-buffer capacity is below the bindless buffer array");
 
 		// PARTIALLY_BOUND | UPDATE_AFTER_BIND; deliberately no
@@ -1019,7 +1008,7 @@ namespace rhi {
 		}
 		else
 		{
-			TE_CORE_ASSERT(m_NextBindlessIndex < kBindlessTextures, "bindless texture array exhausted");
+			HEARTH_ASSERT(m_NextBindlessIndex < kBindlessTextures, "bindless texture array exhausted");
 			index = m_NextBindlessIndex++;
 		}
 		return index;
@@ -1060,7 +1049,7 @@ namespace rhi {
 		}
 		else
 		{
-			TE_CORE_ASSERT(m_NextBindlessBufferIndex < kBindlessBuffers, "bindless buffer array exhausted");
+			HEARTH_ASSERT(m_NextBindlessBufferIndex < kBindlessBuffers, "bindless buffer array exhausted");
 			index = m_NextBindlessBufferIndex++;
 		}
 		return index;
@@ -1090,7 +1079,7 @@ namespace rhi {
 
 	void VulkanRhiDevice::ApplyDescriptorLog(uint32_t slot)
 	{
-		TE_CORE_ASSERT(slot < VulkanDevice::TotalFrameSlots, "descriptor apply with an out-of-range frame slot");
+		HEARTH_ASSERT(slot < VulkanDevice::TotalFrameSlots, "descriptor apply with an out-of-range frame slot");
 
 		std::lock_guard lock(m_DescriptorLogMutex);
 
@@ -1417,7 +1406,7 @@ namespace rhi {
 	void VulkanRhiDevice::AssertRetireQueueOwner(const char* entryPoint) const
 	{
 		(void)entryPoint;
-		TE_CORE_ASSERT(m_Vulkan.IsGameThread(), std::string("VulkanRhiDevice::") + entryPoint + " off the game thread - the retire queue is game-thread-owned; a GPU object's last Ref must drop on the game thread");
+		HEARTH_ASSERT(m_Vulkan.IsGameThread(), std::string("VulkanRhiDevice::") + entryPoint + " off the game thread - the retire queue is game-thread-owned; a GPU object's last Ref must drop on the game thread");
 	}
 
 	size_t VulkanRhiDevice::GetRetireQueueSize() const
@@ -1445,7 +1434,7 @@ namespace rhi {
 		if (entry.Kind_ == RetireEntry::Kind::Buffer && IsValid(entry.BufferSlot))
 		{
 			const bool released = m_Buffers.Release(entry.BufferSlot);
-			TE_CORE_ASSERT(released, "retiring an invalid/stale RHI buffer slot");
+			HEARTH_ASSERT(released, "retiring an invalid/stale RHI buffer slot");
 			(void)released;
 		}
 
@@ -1618,8 +1607,8 @@ namespace rhi {
 
 	BufferHandle VulkanRhiDevice::CreateBuffer(const BufferDesc& desc, const char* debugName)
 	{
-		TE_CORE_ASSERT(m_Initialized, "RHI buffer created before the device");
-		TE_CORE_ASSERT(desc.Usage != BufferUsage::None, "RHI buffer created with no usage (BufferDesc::Usage is explicit)");
+		HEARTH_ASSERT(m_Initialized, "RHI buffer created before the device");
+		HEARTH_ASSERT(desc.Usage != BufferUsage::None, "RHI buffer created with no usage (BufferDesc::Usage is explicit)");
 		VkBufferUsageFlags usage = 0;
 		if (HasUsage(desc.Usage, BufferUsage::Vertex))
 			usage |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
@@ -1648,7 +1637,7 @@ namespace rhi {
 		// so it runs in every config (a slot left alive is double-queued by
 		// the ShutdownDevice sweep).
 		VulkanBuffer* buffer = m_Buffers.BeginRetire(handle);
-		TE_CORE_ASSERT(buffer, "destroying an invalid/stale RHI buffer");
+		HEARTH_ASSERT(buffer, "destroying an invalid/stale RHI buffer");
 		if (buffer)
 			QueueBufferForDestruction(buffer->GetHandle(), buffer->GetAllocation(), buffer->GetBindlessIndex(), handle);
 	}
@@ -1656,7 +1645,7 @@ namespace rhi {
 	void VulkanRhiDevice::WriteBindlessBuffer(uint32_t index, BufferHandle handle)
 	{
 		VulkanBuffer* buffer = m_Buffers.Get(handle);
-		TE_CORE_ASSERT(buffer, "WriteBindlessBuffer with an invalid/stale buffer handle");
+		HEARTH_ASSERT(buffer, "WriteBindlessBuffer with an invalid/stale buffer handle");
 		// The slot is remembered so DestroyBuffer's retire path tombstones
 		// the descriptor + recycles the index.
 		buffer->SetBindlessIndex(index);
@@ -1679,7 +1668,7 @@ namespace rhi {
 	{
 		if (VulkanBuffer* buffer = m_Buffers.Get(handle))
 		{
-			TE_CORE_ASSERT((buffer->GetUsage() & VK_BUFFER_USAGE_TRANSFER_DST_BIT) != 0, "UploadBufferViaStaging into a buffer created without transfer-dst usage");
+			HEARTH_ASSERT((buffer->GetUsage() & VK_BUFFER_USAGE_TRANSFER_DST_BIT) != 0, "UploadBufferViaStaging into a buffer created without transfer-dst usage");
 			buffer->UploadViaStaging(data, size);
 		}
 	}
@@ -1688,7 +1677,7 @@ namespace rhi {
 
 	TextureHandle VulkanRhiDevice::CreateTexture(const TextureDesc& desc, const void* initialData, uint64_t dataSize, const char* debugName)
 	{
-		TE_CORE_ASSERT(m_Initialized, "RHI texture created before the device");
+		HEARTH_ASSERT(m_Initialized, "RHI texture created before the device");
 
 		TextureHandle handle = m_Textures.Acquire();
 		VulkanTexture2D* texture = nullptr;
@@ -1698,8 +1687,8 @@ namespace rhi {
 		// own D32 depth) - assert instead of half-supporting.
 		if (desc.RenderTarget || desc.DepthTarget)
 		{
-			TE_CORE_ASSERT(!desc.DepthTarget, "depth render-target transients unsupported - the G-buffer shares the target's D32");
-			TE_CORE_ASSERT(desc.MipLevels == 1, "render-target transients are single-level");
+			HEARTH_ASSERT(!desc.DepthTarget, "depth render-target transients unsupported - the G-buffer shares the target's D32");
+			HEARTH_ASSERT(desc.MipLevels == 1, "render-target transients are single-level");
 			texture = new VulkanTexture2D(desc.Width, desc.Height, ToVkFormat(desc.PixelFormat), false);
 		}
 		else if (desc.MipLevels == 1)
@@ -1743,7 +1732,7 @@ namespace rhi {
 	TextureHandle VulkanRhiDevice::CreateTextureFromBakedMips(uint32_t width, uint32_t height,
 		const std::vector<std::vector<uint8_t>>& mipLevels, const char* debugName)
 	{
-		TE_CORE_ASSERT(m_Initialized, "RHI texture created before the device");
+		HEARTH_ASSERT(m_Initialized, "RHI texture created before the device");
 		TextureHandle handle = m_Textures.Acquire();
 		std::unique_ptr<VulkanTextureEntry> entry = std::make_unique<VulkanTextureEntry>();
 		entry->Owned.reset(new VulkanTexture2D(width, height, mipLevels));
@@ -1754,9 +1743,9 @@ namespace rhi {
 
 	TextureHandle VulkanRhiDevice::CreateTextureFromNativeImage(void* nativeImage, uint32_t width, uint32_t height, Format format)
 	{
-		TE_CORE_ASSERT(m_Initialized, "RHI wrapped image created before the device");
-		TE_CORE_ASSERT(nativeImage, "wrapping a null image");
-		TE_CORE_ASSERT(format == Format::B8G8R8A8_UNORM || format == Format::R8G8B8A8_UNORM,
+		HEARTH_ASSERT(m_Initialized, "RHI wrapped image created before the device");
+		HEARTH_ASSERT(nativeImage, "wrapping a null image");
+		HEARTH_ASSERT(format == Format::B8G8R8A8_UNORM || format == Format::R8G8B8A8_UNORM,
 			"wrapped images are BGRA8/RGBA8 only (the framebuffer/texture formats in use)");
 
 		VkImage image = (VkImage)nativeImage;
@@ -1784,8 +1773,8 @@ namespace rhi {
 
 	TextureHandle VulkanRhiDevice::AdoptExternalImage(void* nativeImage)
 	{
-		TE_CORE_ASSERT(m_Initialized, "RHI image adopted before the device");
-		TE_CORE_ASSERT(nativeImage, "adopting a null image");
+		HEARTH_ASSERT(m_Initialized, "RHI image adopted before the device");
+		HEARTH_ASSERT(nativeImage, "adopting a null image");
 
 		// Barrier-target adoption: no view, no bindless slot (the sentinel
 		// index never recycles). Destroy releases the handle only.
@@ -1808,7 +1797,7 @@ namespace rhi {
 				QueueTextureForDestruction(VK_NULL_HANDLE, VK_NULL_HANDLE, entry->Wrapped->GetView(), VK_NULL_HANDLE, entry->Wrapped->GetBindlessIndex());
 		}
 		const bool textureReleased = m_Textures.Release(handle);
-		TE_CORE_ASSERT(textureReleased, "destroying an invalid/stale RHI texture");
+		HEARTH_ASSERT(textureReleased, "destroying an invalid/stale RHI texture");
 	}
 
 	void VulkanRhiDevice::SetTextureData(TextureHandle handle, const void* data, uint64_t size)
@@ -1845,7 +1834,7 @@ namespace rhi {
 
 	SamplerHandle VulkanRhiDevice::CreateSampler(const SamplerDesc& desc, const char* debugName)
 	{
-		TE_CORE_ASSERT(m_Initialized, "RHI sampler created before the device");
+		HEARTH_ASSERT(m_Initialized, "RHI sampler created before the device");
 		SamplerHandle handle = m_Samplers.Acquire();
 		VulkanSampler* sampler = new VulkanSampler();
 		sampler->Init(m_Vulkan, desc, debugName);
@@ -1858,12 +1847,12 @@ namespace rhi {
 		if (VulkanSampler* sampler = m_Samplers.Get(handle))
 			QueueSamplerForDestruction(sampler->GetHandle());
 		const bool samplerReleased = m_Samplers.Release(handle);
-		TE_CORE_ASSERT(samplerReleased, "destroying an invalid/stale RHI sampler");
+		HEARTH_ASSERT(samplerReleased, "destroying an invalid/stale RHI sampler");
 	}
 
 	ShaderHandle VulkanRhiDevice::CreateShader(std::span<const uint32_t> spirv, ShaderStage stage, const char* debugName, const ShaderIdentity* identity)
 	{
-		TE_CORE_ASSERT(m_Initialized, "RHI shader created before the device");
+		HEARTH_ASSERT(m_Initialized, "RHI shader created before the device");
 		ShaderHandle handle = m_Shaders.Acquire();
 		VulkanShaderModule* shader = new VulkanShaderModule();
 		shader->Init(m_Vulkan, std::vector<uint32_t>(spirv.begin(), spirv.end()), ToVkStage(stage), debugName);
@@ -1878,7 +1867,7 @@ namespace rhi {
 
 	Device::ShaderReloadResult VulkanRhiDevice::ReloadShader(std::string_view name, std::span<const uint32_t> spirv)
 	{
-		TE_CORE_ASSERT(m_Initialized, "RHI shader reloaded before the device");
+		HEARTH_ASSERT(m_Initialized, "RHI shader reloaded before the device");
 		ShaderReloadResult result;
 		const std::vector<uint32_t> code(spirv.begin(), spirv.end());
 
@@ -1965,7 +1954,7 @@ namespace rhi {
 		for (Rebuilt& r : rebuilt)
 		{
 			VulkanPipeline* pipeline = m_Pipelines.Get(r.Handle);
-			TE_CORE_ASSERT(pipeline, "a cached pipeline without its slot");
+			HEARTH_ASSERT(pipeline, "a cached pipeline without its slot");
 			pipeline->SwapContents(r.Pipeline);
 			QueuePipelineForDestruction(r.Pipeline.GetHandle(), r.Pipeline.GetLayout());
 		}
@@ -1989,7 +1978,7 @@ namespace rhi {
 		if (VulkanShaderModule* shader = m_Shaders.Get(handle))
 			QueueShaderForDestruction(shader->GetHandle());
 		const bool shaderReleased = m_Shaders.Release(handle);
-		TE_CORE_ASSERT(shaderReleased, "destroying an invalid/stale RHI shader");
+		HEARTH_ASSERT(shaderReleased, "destroying an invalid/stale RHI shader");
 	}
 
 	uint64_t VulkanRhiDevice::HashPipelineStateDesc(const PipelineStateDesc& desc)
@@ -2048,7 +2037,7 @@ namespace rhi {
 
 	PipelineHandle VulkanRhiDevice::CreatePipeline(const PipelineStateDesc& desc, const char* debugName)
 	{
-		TE_CORE_ASSERT(m_Initialized, "RHI pipeline created before the device");
+		HEARTH_ASSERT(m_Initialized, "RHI pipeline created before the device");
 
 		// The cache lookup - keyed by (state hash, vertex shader handle,
 		// fragment shader handle). A hit returns the cached pipeline
@@ -2082,7 +2071,7 @@ namespace rhi {
 		spec.DepthBiasConstantFactor = desc.DepthBiasConstantFactor;
 		spec.DepthBiasSlopeFactor = desc.DepthBiasSlopeFactor;
 		spec.PolygonMode = ToVkPolygonMode(desc.PolygonMode);
-		TE_CORE_ASSERT(desc.ColorAttachmentCount <= PipelineStateDesc::kMaxColorAttachments,
+		HEARTH_ASSERT(desc.ColorAttachmentCount <= PipelineStateDesc::kMaxColorAttachments,
 			"pipeline colour-attachment count over the RHI maximum");
 		spec.ColorAttachmentCount = desc.ColorAttachmentCount;
 		for (uint32_t i = 0; i < desc.ColorAttachmentCount; ++i)
@@ -2098,7 +2087,7 @@ namespace rhi {
 
 	PipelineHandle VulkanRhiDevice::CreateComputePipeline(const ComputePipelineDesc& desc, const char* debugName)
 	{
-		TE_CORE_ASSERT(m_Initialized, "RHI compute pipeline created before the device");
+		HEARTH_ASSERT(m_Initialized, "RHI compute pipeline created before the device");
 		// The key's vertex-shader slot holds the compute shader, so
 		// DestroyShader's eviction and InvalidatePipelines match it as they
 		// match a graphics pipeline's shaders; the tag keeps the hash apart
@@ -2117,7 +2106,7 @@ namespace rhi {
 
 		VulkanPipelineSpec spec;
 		spec.ComputeShader = m_Shaders.Get(desc.ComputeShader);
-		TE_CORE_ASSERT(spec.ComputeShader && spec.ComputeShader->GetStage() == VK_SHADER_STAGE_COMPUTE_BIT,
+		HEARTH_ASSERT(spec.ComputeShader && spec.ComputeShader->GetStage() == VK_SHADER_STAGE_COMPUTE_BIT,
 			"CreateComputePipeline needs a live compute shader");
 		spec.PushConstantSize = desc.PushConstantSize;
 		spec.PushConstantStages = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -2181,7 +2170,7 @@ namespace rhi {
 		if (VulkanPipeline* pipeline = m_Pipelines.Get(handle))
 			QueuePipelineForDestruction(pipeline->GetHandle(), pipeline->GetLayout());
 		const bool pipelineReleased = m_Pipelines.Release(handle);
-		TE_CORE_ASSERT(pipelineReleased, "destroying an invalid/stale RHI pipeline");
+		HEARTH_ASSERT(pipelineReleased, "destroying an invalid/stale RHI pipeline");
 	}
 
 	void VulkanRhiDevice::InvalidatePipelines(const AssetID& shaderAsset)
@@ -2204,8 +2193,8 @@ namespace rhi {
 
 	CommandListHandle VulkanRhiDevice::CreateCommandList(QueueHandle queue, uint32_t threadIndex)
 	{
-		TE_CORE_ASSERT(m_Initialized, "RHI command list created before the device");
-		TE_CORE_ASSERT(threadIndex == 0, "P-A1 records on the main thread only (thread pools land in P-A2)");
+		HEARTH_ASSERT(m_Initialized, "RHI command list created before the device");
+		HEARTH_ASSERT(threadIndex == 0, "P-A1 records on the main thread only (thread pools land in P-A2)");
 		(void)queue;
 
 		VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
@@ -2228,7 +2217,7 @@ namespace rhi {
 	void VulkanRhiDevice::DestroyCommandList(CommandListHandle handle)
 	{
 		const bool commandListReleased = m_CommandLists.Release(handle);
-		TE_CORE_ASSERT(commandListReleased, "destroying an invalid/stale RHI command list");
+		HEARTH_ASSERT(commandListReleased, "destroying an invalid/stale RHI command list");
 	}
 
 	CommandList* VulkanRhiDevice::GetCommandList(CommandListHandle handle)
@@ -2260,7 +2249,7 @@ namespace rhi {
 			if (auto* list = m_CommandLists.Get(handle))
 				buffers.push_back(list->GetCommandBuffer());
 		}
-		TE_CORE_ASSERT(!buffers.empty(), "Submit requires at least one command list (v1)");
+		HEARTH_ASSERT(!buffers.empty(), "Submit requires at least one command list (v1)");
 
 		uint64_t waitValue = 0;
 		for (const TimelineWait& wait : waits)
@@ -2306,7 +2295,7 @@ namespace rhi {
 				// An explicit signal must outrun every wait in this submit
 				// (the same semaphore is both waited and signalled) and
 				// keep the device's allocator monotonic for later submits.
-				TE_CORE_ASSERT(signalValue > waitValue, "a submit must signal past every timeline value it waits on");
+				HEARTH_ASSERT(signalValue > waitValue, "a submit must signal past every timeline value it waits on");
 				m_Vulkan.AdvanceTimelineValue(signalValue);
 			}
 			VulkanCheckResult(vkQueueSubmit(m_Vulkan.GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE),
@@ -2332,10 +2321,10 @@ namespace rhi {
 		// per-frame fences are gone). VulkanContext still drives the frame
 		// loop through its own VulkanSwapchain instance; this is the RHI's
 		// owner API for per-window state (P-D's WispWindowRenderState).
-		EnsureDevice((GLFWwindow*)window);
+		EnsureDevice((hearth::platform::Window*)window);
 		SwapchainHandle handle = m_Swapchains.Acquire();
 		m_Swapchains.Publish(handle, std::make_unique<VulkanSwapchain>());
-		m_Swapchains.Get(handle)->Init(m_Vulkan, (GLFWwindow*)window);
+		m_Swapchains.Get(handle)->Init(m_Vulkan, *this, (hearth::platform::Window*)window);
 		return handle;
 	}
 

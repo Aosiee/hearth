@@ -1,6 +1,7 @@
 #pragma once
 
 #include "TinyEngine/Profiler/Profiler.h"
+#include "hearth/Assert.h"
 #include "TinyEngine/Profiler/GpuFrameDebugData.h"
 
 #include "Platform/Vulkan/VulkanCommon.h"
@@ -12,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-struct GLFWwindow;
+namespace hearth::platform { class Platform; class Window; }
 
 namespace TinyEngine {
 
@@ -92,7 +93,7 @@ namespace TinyEngine {
 		// windowForExtensionQuery is only used to ask GLFW which instance extensions
 		// this windowing system needs (X11/Wayland/Win32 surface support etc). No
 		// surface is created here, that happens per window in VulkanSwapchain.
-		void Init(GLFWwindow* windowForExtensionQuery);
+		void Init(hearth::platform::Window* windowForExtensionQuery);
 		void Shutdown();
 
 		VkInstance GetInstance() const { return m_Instance; }
@@ -116,7 +117,7 @@ namespace TinyEngine {
 		VkCommandPool GetCommandPool(uint32_t frameIndex, uint32_t threadIndex = 0) const
 		{
 			uint32_t poolIndex = frameIndex * m_RecordThreadCount + threadIndex;
-			TE_CORE_ASSERT(poolIndex < m_CommandPools.size() && m_CommandPools[poolIndex] != VK_NULL_HANDLE, "Command pool index out of range!");
+			HEARTH_ASSERT(poolIndex < m_CommandPools.size() && m_CommandPools[poolIndex] != VK_NULL_HANDLE, "Command pool index out of range!");
 			return m_CommandPools[poolIndex];
 		}
 
@@ -143,7 +144,7 @@ namespace TinyEngine {
 		void SetGpuFrameDebugSink(GpuFrameDebugSink* sink) { m_GpuFrameDebugSink = sink; }
 		GpuFrameDebugSink& GetGpuFrameDebugSink() const
 		{
-			TE_CORE_ASSERT(m_GpuFrameDebugSink, "VulkanDevice: the GPU frame debug sink was never set (RhiDevice::Init sets it)");
+			HEARTH_ASSERT(m_GpuFrameDebugSink, "VulkanDevice: the GPU frame debug sink was never set (RhiDevice::Init sets it)");
 			return *m_GpuFrameDebugSink;
 		}
 #endif
@@ -202,7 +203,7 @@ namespace TinyEngine {
 		// routes through this; the P-A2 frame-sync rework re-keys it).
 		VkQueryPool GetTimestampPool(uint32_t frameIndex) const
 		{
-			TE_CORE_ASSERT(frameIndex < m_TimestampPools.size() && m_TimestampPools[frameIndex] != VK_NULL_HANDLE, "Timestamp pool index out of range!");
+			HEARTH_ASSERT(frameIndex < m_TimestampPools.size() && m_TimestampPools[frameIndex] != VK_NULL_HANDLE, "Timestamp pool index out of range!");
 			return m_TimestampPools[frameIndex];
 		}
 
@@ -252,7 +253,7 @@ namespace TinyEngine {
 		bool BatchRetireStaging(VkBuffer buffer, VmaAllocation allocation);
 
 	private:
-		void CreateInstance(GLFWwindow* windowForExtensionQuery);
+		void CreateInstance(hearth::platform::Window* windowForExtensionQuery);
 		void CreateDebugMessenger();
 		void PickPhysicalDevice();
 		void CreateLogicalDevice();
@@ -315,6 +316,9 @@ namespace TinyEngine {
 		// the surface/swapchain extensions and without the
 		// present-capability requirement.
 		bool m_SurfaceEnabled = true;
+		// The window system the surfaces come from (null in the Offscreen
+		// mode, which has none).
+		const hearth::platform::Platform* m_Platform = nullptr;
 		// GPU frame debugger timing.
 		// One query pool per frame slot (window slot * FramesInFlight), same
 		// reasoning as the command pools: reusing slot N is only safe once
