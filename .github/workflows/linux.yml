@@ -1,10 +1,12 @@
 # Builds Hearth and runs its suite in each configuration it is checked in:
-# GCC and Clang, Debug and Release, without zones, and the address,
-# undefined-behaviour and thread sanitizers.
+# GCC and Clang, Debug and Release, without zones and the GPU developer
+# tools, and the address, undefined-behaviour and thread sanitizers. The GPU
+# suite runs on Mesa's lavapipe.
 #
 # hamr (the suite's test library) is checked out at the commit
-# CMakeLists.txt pins; GLFW (TinyEngine's fork) and Vulkan-Headers are
-# fetched at theirs. GLFW builds with its null platform only, so the runner
+# CMakeLists.txt pins; GLFW (TinyEngine's fork), Vulkan-Headers, volk, the
+# Vulkan Memory Allocator, loom, BLAKE3 and SPIRV-Cross are fetched at
+# theirs. GLFW builds with its null platform only, so the runner
 # needs no X11 or Wayland libraries and the suite no display.
 name: Linux
 
@@ -34,7 +36,7 @@ jobs:
           - { name: gcc release,       cxx: g++,     type: Release }
           - { name: gcc debug,         cxx: g++,     type: Debug }
           - { name: clang release,     cxx: clang++, type: Release }
-          - { name: no zones,          cxx: g++,     type: Debug,          flags: -DHEARTH_NO_ZONES=ON }
+          - { name: no zones or tools, cxx: g++,     type: Debug,          flags: -DHEARTH_NO_ZONES=ON -DHEARTH_GPU_DEBUG=OFF }
           - { name: address sanitizer, cxx: g++,     type: RelWithDebInfo, flags: -DHEARTH_SANITIZE=address }
           - { name: ub sanitizer,      cxx: g++,     type: RelWithDebInfo, flags: -DHEARTH_SANITIZE=undefined }
           - { name: thread sanitizer,  cxx: g++,     type: RelWithDebInfo, flags: -DHEARTH_SANITIZE=thread }
@@ -74,3 +76,14 @@ jobs:
           timeout 10m build/hearth_tests
           timeout 10m build/hearth_platform_tests
           timeout 10m build/hearth_default_host_tests
+          timeout 10m build/hearth_rhi_tests
+
+      # The GPU suite on Mesa's software rasterizer. Not under the
+      # sanitizers: the driver is not built with them.
+      - name: Install lavapipe
+        if: "!contains(matrix.flags, 'HEARTH_SANITIZE')"
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+
+      - name: GPU test
+        if: "!contains(matrix.flags, 'HEARTH_SANITIZE')"
+        run: timeout 10m build/hearth_rhi_gpu_tests

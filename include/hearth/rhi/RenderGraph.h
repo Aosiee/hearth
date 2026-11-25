@@ -12,16 +12,16 @@
 // state forward so the next frame's derivation seeds from where the last
 // one left it).
 
-#include "TinyEngine/RHI/RHI.h"
+#include "hearth/rhi/RHI.h"
 
 #include <functional>
 #include <string>
 #include <unordered_map>
 #include <algorithm>
 #include <vector>
+#include <memory>
 
-namespace TinyEngine {
-namespace rg {
+namespace hearth::rg {
 
 	// The graph's vocabulary IS the RHI's (handles, states, barriers).
 	using namespace rhi;
@@ -298,5 +298,4 @@ namespace rg {
 		std::vector<BufferState> m_FinalBufferStates;
 	};
 
-} // namespace rg
-} // namespace TinyEngine
+} // namespace hearth::rg

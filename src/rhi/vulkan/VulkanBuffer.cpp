@@ -1,8 +1,8 @@
-#include "tepch.h"
-#include "Platform/Vulkan/Resources/VulkanBuffer.h"
+#include "hearth/rhi/vulkan/VulkanBuffer.h"
 #include "hearth/Assert.h"
+#include <cstring>
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
 	void VulkanBuffer::Init(VulkanDevice& device, VkDeviceSize size, VkBufferUsageFlags usage, bool hostVisible, const std::string& debugName)
 	{

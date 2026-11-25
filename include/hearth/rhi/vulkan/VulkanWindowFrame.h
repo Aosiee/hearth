@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
 	// A registered framebuffer target's default owner: the main window,
 	// resolved through WindowFrame::IsMain at publish and at record (no

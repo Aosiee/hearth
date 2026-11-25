@@ -1,8 +1,9 @@
 #pragma once
 
-#include "Platform/Vulkan/VulkanCommon.h"
+#include "hearth/rhi/vulkan/VulkanCommon.h"
+#include <vector>
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
 	struct VulkanShaderReflectionInfo
 	{

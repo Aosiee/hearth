@@ -1,10 +1,10 @@
 #pragma once
 
-#include "TinyEngine/Profiler/Profiler.h"
 #include "hearth/Assert.h"
-#include "TinyEngine/Profiler/GpuFrameDebugData.h"
+#include "hearth/rhi/GpuFrameDebugData.h"
+#include "hearth/rhi/vulkan/VulkanWindowContext.h"
 
-#include "Platform/Vulkan/VulkanCommon.h"
+#include "hearth/rhi/vulkan/VulkanCommon.h"
 
 #include <array>
 #include <atomic>
@@ -15,9 +15,8 @@
 
 namespace hearth::platform { class Platform; class Window; }
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
-	class VulkanContext;
 
 	// Owns everything about the Vulkan backend that exists once for the whole
 	// application: the instance, the physical/logical device pair, the
@@ -52,7 +51,7 @@ namespace TinyEngine {
 
 		// Reserves the lowest free window slot and returns its base frame index
 		// (slotIndex * FramesInFlight). Must be called between frames (a
-		// window's VulkanContext::Init), never while another window's
+		// window context's creation), never while another window's
 		// submission is in flight. Asserts when every slot is claimed.
 		// The slot records its owning context until ReleaseWindowSlot (the
 		// context's destructor), so the game-thread parks can wait EVERY live
@@ -61,12 +60,12 @@ namespace TinyEngine {
 		// the old owner's destructor calls it once its last GPU work has
 		// completed and its command buffers are freed - so the cap counts the
 		// LIVE windows. The lowest free slot is taken.
-		uint32_t AllocateWindowSlot(VulkanContext* owner);
+		uint32_t AllocateWindowSlot(VulkanWindowContext* owner);
 		void ReleaseWindowSlot(uint32_t slotBase);
 		void RecycleWindowSlot(uint32_t slotBase);
 		// The live window contexts, indexed by window slot (null = never
 		// allocated or released). Game-thread-only, like the allocation.
-		const std::array<VulkanContext*, MaxWindowSlots>& GetLiveWindowContexts() const { return m_WindowContexts; }
+		const std::array<VulkanWindowContext*, MaxWindowSlots>& GetLiveWindowContexts() const { return m_WindowContexts; }
 
 		// The main window's context, owned here, beside the window-slot
 		// table (formerly the file-scope s_MainVulkanContext). Set exactly
@@ -78,21 +77,28 @@ namespace TinyEngine {
 		// joins its submit thread, whose last record still reads the main
 		// context. Written on the game thread between frames; read on the
 		// game thread and inside record jobs (the same access as before).
-		void SetMainContext(VulkanContext* context);
-		void ClearMainContext(VulkanContext* context);
-		VulkanContext* TryGetMainContext() const { return m_MainContext; }
+		void SetMainContext(VulkanWindowContext* context);
+		void ClearMainContext(VulkanWindowContext* context);
+		VulkanWindowContext* TryGetMainContext() const { return m_MainContext; }
 		// Asserts the main context exists (a null main context in a
 		// windowed flavor is a bug, not a case).
-		VulkanContext& GetMainContext() const;
+		VulkanWindowContext& GetMainContext() const;
 
 		// The game thread: the thread that created the device (the first
-		// window's VulkanContext::Init). The transient pool and the upload
+		// window context's creation). The transient pool and the upload
 		// batch below are game-thread-only.
 		bool IsGameThread() const { return std::this_thread::get_id() == m_GameThreadId; }
 
 		// windowForExtensionQuery is only used to ask GLFW which instance extensions
 		// this windowing system needs (X11/Wayland/Win32 surface support etc). No
 		// surface is created here, that happens per window in VulkanSwapchain.
+		// The names the Vulkan instance reports (drivers may key behaviour on
+		// them). Set before Init.
+		void SetApplicationInfo(std::string applicationName, std::string engineName)
+		{
+			m_ApplicationName = std::move(applicationName);
+			m_EngineName = std::move(engineName);
+		}
 		void Init(hearth::platform::Window* windowForExtensionQuery);
 		void Shutdown();
 
@@ -135,16 +141,18 @@ namespace TinyEngine {
 
 		bool IsValidationEnabled() const { return m_ValidationEnabled; }
 
-#if !defined(TE_CONF_DIST)
-		// The GPU frame debugger's sink, owned by the RhiDevice subsystem
-		// (which owns this device, so the sink outlives every writer). Set
-		// before Init - the instance's chained messenger reports through it
+#if defined(HEARTH_GPU_DEBUG)
+		// The GPU frame debugger's sink, the program's and optional (it must
+		// outlive the device: the messenger and the submit thread write it).
+		// Set before Init - the instance's chained messenger reports through it
 		// (its pUserData). The record passes and the submit thread write
 		// through GetGpuFrameDebugSink.
 		void SetGpuFrameDebugSink(GpuFrameDebugSink* sink) { m_GpuFrameDebugSink = sink; }
+		// The program's profiler (optional: no timing is reported without one).
+		void SetGpuTimingSink(GpuTimingSink* sink) { m_GpuTimingSink = sink; }
 		GpuFrameDebugSink& GetGpuFrameDebugSink() const
 		{
-			HEARTH_ASSERT(m_GpuFrameDebugSink, "VulkanDevice: the GPU frame debug sink was never set (RhiDevice::Init sets it)");
+			HEARTH_ASSERT(m_GpuFrameDebugSink, "VulkanDevice: the GPU frame debug sink was never set (set it before Init)");
 			return *m_GpuFrameDebugSink;
 		}
 #endif
@@ -267,9 +275,12 @@ namespace TinyEngine {
 	private:
 		VkInstance m_Instance = VK_NULL_HANDLE;
 		VkDebugUtilsMessengerEXT m_DebugMessenger = VK_NULL_HANDLE;
-#if !defined(TE_CONF_DIST)
-		GpuFrameDebugSink* m_GpuFrameDebugSink = nullptr; // owned by the RhiDevice subsystem
+#if defined(HEARTH_GPU_DEBUG)
+		GpuFrameDebugSink* m_GpuFrameDebugSink = nullptr; // the program's; outlives the device
+		GpuTimingSink* m_GpuTimingSink = nullptr; // the program's; may be null
 #endif
+		std::string m_ApplicationName = "Hearth program";
+		std::string m_EngineName = "Hearth";
 
 		VkPhysicalDevice m_PhysicalDevice = VK_NULL_HANDLE;
 		VkDevice m_Device = VK_NULL_HANDLE;
@@ -289,8 +300,8 @@ namespace TinyEngine {
 
 		// Claimed from AllocateWindowSlot until RecycleWindowSlot.
 		std::array<bool, MaxWindowSlots> m_WindowSlotClaimed{};
-		std::array<VulkanContext*, MaxWindowSlots> m_WindowContexts{};
-		VulkanContext* m_MainContext = nullptr;
+		std::array<VulkanWindowContext*, MaxWindowSlots> m_WindowContexts{};
+		VulkanWindowContext* m_MainContext = nullptr;
 
 		std::thread::id m_GameThreadId;
 		void AssertGameThread(const char* entryPoint) const;

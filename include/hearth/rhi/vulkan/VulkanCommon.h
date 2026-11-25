@@ -1,10 +1,8 @@
 #pragma once
 
-// Volk is the vendored, dynamically loaded Vulkan meta-loader (third_party plugin).
-// It is used instead of linking directly against the system Vulkan loader so the engine
-// never has a build time dependency on the Vulkan SDK being installed. Including it here
-// also pulls in the real Vulkan-Headers (vendored separately), which is what makes GLFW
-// declare glfwCreateWindowSurface and friends when GLFW is included afterwards.
+// volk loads Vulkan at run time, so nothing links against the system
+// Vulkan loader and no Vulkan SDK is needed to build. It also brings in
+// Vulkan-Headers.
 #include <volk.h>
 
 // VMA is told to fetch every Vulkan function it needs itself, dynamically, starting
@@ -21,8 +19,10 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #pragma GCC diagnostic ignored "-Wunused-variable"
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#if defined(__clang__)
 #pragma clang diagnostic ignored "-Wnullability-completeness"
-#pragma GCC diagnostic ignored "-Wunused-private-field"
+#pragma clang diagnostic ignored "-Wunused-private-field"
+#endif
 #include <vk_mem_alloc.h>
 #pragma GCC diagnostic pop
 
@@ -30,46 +30,27 @@
 
 #include "hearth/Assert.h"
 #include "hearth/Log.h"
-#include "TinyEngine/Core/Log.h"
 
 namespace hearth {
 
-	// The GPU layer's category (Hearth's log; the engine's host routes it
-	// to the engine's LogVulkan below, the same category by name).
+	// The GPU layer's log category: validation messages, device and
+	// swapchain lifetime, failed Vulkan calls.
 	HEARTH_LOG_CATEGORY(LogVulkan)
 
 }
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
-	// Shared by every Vulkan-side file that wants to log under its own
-	// category instead of the generic Core logger - the validation
-	// messenger callback (VulkanDevice.cpp) is the main user, since that's
-	// the single noisiest source of log lines in the whole engine and
-	// exactly the kind of thing you want to filter out of the log window
-	// independently of everything else.
-	TE_DECLARE_LOG_CATEGORY(LogVulkan)
-
-	// Shared by VulkanSwapchain and VulkanFramebuffer - both targets need to
-	// use the exact same depth format, not just any mutually-valid one,
-	// because Renderer2D and Renderer3D each lazily create a single shared
-	// pipeline object used against whichever target it's currently drawing
-	// into (see VulkanRenderer2D.h's class comment for why one pipeline
-	// serves both targets rather than one per target). A pipeline's
-	// VkPipelineRenderingCreateInfo::depthAttachmentFormat has to match the
-	// active rendering instance's depth attachment format exactly or it's a
-	// validation error the moment that pipeline is bound, regardless of
-	// whether depth test/write are even enabled on it - hardcoding one
-	// format everywhere sidesteps needing per-target pipeline variants.
-	// D32_SFLOAT isn't unconditionally guaranteed by the Vulkan spec the way
-	// the swapchain's colour format effectively is on this hardware, but
-	// every desktop GPU this engine has run on supports it - worth
-	// revisiting with a real capability query if that ever changes.
+	// The one depth format of every target the layer makes (swapchain and
+	// framebuffers alike): a pipeline's depthAttachmentFormat must match the
+	// target it is bound against, even with depth test and write off, so one
+	// format lets one pipeline draw into any of them. D32_SFLOAT is not
+	// guaranteed by the specification, but every desktop GPU supports it.
 	constexpr VkFormat kSharedDepthFormat = VK_FORMAT_D32_SFLOAT;
 
-	// Turns a failed Vulkan call into an assertion instead of letting the backend limp
-	// along with a half constructed device or swapchain. Every call that returns a
-	// VkResult in the Vulkan backend should be wrapped in this.
+	// A failed Vulkan call is an assertion, not a half-made device or
+	// swapchain carrying on. Every call that returns a VkResult goes
+	// through VK_CHECK.
 	inline void VulkanCheckResult(VkResult result, const char* expression, const char* file, int line)
 	{
 		if (result != VK_SUCCESS)
@@ -81,4 +62,4 @@ namespace TinyEngine {
 
 }
 
-#define VK_CHECK(expression) ::TinyEngine::VulkanCheckResult((expression), #expression, __FILE__, __LINE__)
+#define VK_CHECK(expression) ::hearth::rhi::VulkanCheckResult((expression), #expression, __FILE__, __LINE__)

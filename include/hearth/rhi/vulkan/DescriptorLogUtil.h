@@ -1,12 +1,12 @@
 #pragma once
 
 // The descriptor write log's pure helpers (templated on the entry so
-// tinytest drives them without a device).
+// the suite drives them without a device).
 
 #include <cstdint>
 #include <vector>
 
-namespace TinyEngine { namespace rhi {
+namespace hearth::rhi {
 
 	// A recycled bindless index's earlier entries in ONE binding are
 	// superseded by its new owner's write - dropped so the log stays bounded
@@ -20,4 +20,4 @@ namespace TinyEngine { namespace rhi {
 		std::erase_if(log, [index, binding](const Entry& entry) { return entry.Index == index && entry.Binding == binding; });
 	}
 
-}} // namespace TinyEngine::rhi
+} // namespace hearth::rhi

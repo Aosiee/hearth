@@ -5,8 +5,7 @@
 
 #include <cstdint>
 
-namespace TinyEngine {
-namespace rhi {
+namespace hearth::rhi {
 
 	enum class Format : uint32_t
 	{
@@ -32,5 +31,4 @@ namespace rhi {
 		R32_SFLOAT,
 	};
 
-} // namespace rhi
-} // namespace TinyEngine
+} // namespace hearth::rhi

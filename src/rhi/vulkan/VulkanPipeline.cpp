@@ -1,7 +1,6 @@
-#include "tepch.h"
-#include "Platform/Vulkan/Shaders/VulkanPipeline.h"
+#include "hearth/rhi/vulkan/VulkanPipeline.h"
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
 	void VulkanPipeline::Init(VulkanDevice& device, const VulkanPipelineSpec& spec, const std::string& debugName,
 	                          VkPipelineCache cache)

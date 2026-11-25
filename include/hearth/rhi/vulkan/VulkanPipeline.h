@@ -1,10 +1,10 @@
 #pragma once
 
-#include "Platform/Vulkan/VulkanCommon.h"
-#include "Platform/Vulkan/Device/VulkanDevice.h"
-#include "Platform/Vulkan/Shaders/VulkanShaderModule.h"
+#include "hearth/rhi/vulkan/VulkanCommon.h"
+#include "hearth/rhi/vulkan/VulkanDevice.h"
+#include "hearth/rhi/vulkan/VulkanShaderModule.h"
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
 	struct VulkanVertexAttribute
 	{

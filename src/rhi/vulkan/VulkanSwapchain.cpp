@@ -1,14 +1,13 @@
-#include "tepch.h"
-#include "Platform/Vulkan/Device/VulkanSwapchain.h"
+#include "hearth/rhi/vulkan/VulkanSwapchain.h"
 #include "hearth/Assert.h"
 #include "hearth/Log.h"
 #include "hearth/Zone.h"
 
-#include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
+#include "hearth/rhi/vulkan/VulkanRhiDevice.h"
 
 #include "hearth/platform/Window.h"
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
 	void VulkanSwapchain::Init(VulkanDevice& device, rhi::VulkanRhiDevice& rhiDevice, hearth::platform::Window* window)
 	{

@@ -6,13 +6,12 @@
 // Inside the RenderGraph the graph derives these and the caller passes
 // nothing.
 
-#include "TinyEngine/RHI/Types.h"
-#include "TinyEngine/RHI/States.h"
+#include "hearth/rhi/Types.h"
+#include "hearth/rhi/States.h"
 
 #include <cstdint>
 
-namespace TinyEngine {
-namespace rhi {
+namespace hearth::rhi {
 
 	struct TextureBarrier
 	{
@@ -61,5 +60,4 @@ namespace rhi {
 		uint64_t Value = 0;
 	};
 
-} // namespace rhi
-} // namespace TinyEngine
+} // namespace hearth::rhi

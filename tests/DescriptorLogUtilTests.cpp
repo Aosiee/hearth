@@ -1,12 +1,11 @@
-#pragma once
 // The descriptor log's recycle step drops only the recycled binding's
 // entries - the texture and buffer arrays share index numbers, and the old
 // texture recycle erased a pending buffer write at the same number (a
 // RenderScene's frame data stayed unwritten).
 
-#include "Platform/Vulkan/RHI/DescriptorLogUtil.h"
+#include "hearth/rhi/vulkan/DescriptorLogUtil.h"
 
-#include <doctest/doctest.h>
+#include "hamr/test.h"
 
 #include <cstdint>
 #include <vector>
@@ -32,7 +31,7 @@ TEST_CASE("rhi descriptor log: a recycle drops only its own binding's entries, i
 		{ 4, 64, 0 },
 		{ 5, 64, 1 },
 	};
-	TinyEngine::rhi::DropSupersededEntries(log, 64, 0);
+	hearth::rhi::DropSupersededEntries(log, 64, 0);
 	REQUIRE(log.size() == 3);
 	CHECK(log[0].Seq == 2);
 	CHECK(log[1].Seq == 3);
@@ -40,7 +39,7 @@ TEST_CASE("rhi descriptor log: a recycle drops only its own binding's entries, i
 	for (const Entry& entry : log)
 		CHECK(!(entry.Index == 64 && entry.Binding == 0));
 
-	TinyEngine::rhi::DropSupersededEntries(log, 64, 1);
+	hearth::rhi::DropSupersededEntries(log, 64, 1);
 	REQUIRE(log.size() == 1);
 	CHECK(log[0].Index == 65);
 	CHECK(log[0].Binding == 0);

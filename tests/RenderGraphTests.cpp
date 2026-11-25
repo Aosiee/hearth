@@ -1,21 +1,18 @@
-#pragma once
-
 // The RenderGraph core suite: topological ordering, culling, barrier
 // derivation, transient-pool reuse, and the Execute barrier emission,
 // against mock Device/CommandList (the core is pure data-flow - no GPU).
 
-#include "TinyEngine/RenderGraph/RenderGraph.h"
+#include "hearth/rhi/RenderGraph.h"
 
 #include "loom/loom.h"
 
-#include <doctest/doctest.h>
+#include "hamr/test.h"
 
 #include <algorithm>
 #include <atomic>
 #include <string>
 
-namespace TinyEngine {
-namespace rg_tests {
+namespace hearth::rg_tests {
 
 	// ---- Mocks ------------------------------------------------------------------
 
@@ -67,7 +64,7 @@ namespace rg_tests {
 		rhi::ShaderHandle CreateShader(std::span<const uint32_t>, rhi::ShaderStage, const char*, const rhi::ShaderIdentity* = nullptr) override { return {}; }
 		void DestroyShader(rhi::ShaderHandle) override {}
 		ShaderReloadResult ReloadShader(std::string_view, std::span<const uint32_t>) override { return {}; }
-		void InvalidatePipelines(const AssetID&) override {}
+		void InvalidatePipelines(const rhi::ShaderSourceId&) override {}
 		rhi::PipelineHandle CreatePipeline(const rhi::PipelineStateDesc&, const char*) override { return {}; }
 		rhi::PipelineHandle CreateComputePipeline(const rhi::ComputePipelineDesc&, const char*) override { return {}; }
 		void DestroyPipeline(rhi::PipelineHandle) override {}
@@ -878,6 +875,5 @@ namespace rg_tests {
 		CHECK(NameAt(graph, 1) == "Present");
 	}
 
-} // namespace rg_tests
-} // namespace TinyEngine
+} // namespace hearth::rg_tests
 

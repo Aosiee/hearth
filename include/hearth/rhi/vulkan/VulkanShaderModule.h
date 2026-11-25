@@ -1,10 +1,10 @@
 #pragma once
 
-#include "Platform/Vulkan/VulkanCommon.h"
-#include "Platform/Vulkan/Device/VulkanDevice.h"
-#include "TinyEngine/RHI/Types.h"
+#include "hearth/rhi/vulkan/VulkanCommon.h"
+#include "hearth/rhi/vulkan/VulkanDevice.h"
+#include "hearth/rhi/Types.h"
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
 	// Thin wrapper over a single VkShaderModule. Takes already compiled SPIR-V,
 	// doesn't know or care how it got compiled, that's VulkanShaderCompiler's
@@ -34,7 +34,7 @@ namespace TinyEngine {
 			std::swap(m_SpirV, other.m_SpirV);
 		}
 
-		// The asset-side identity (AssetID + variant key) for
+		// The source identity (source id + variant key) for
 		// InvalidatePipelines; HasIdentity false for unidentified shaders.
 		rhi::ShaderIdentity Identity;
 		bool HasIdentity = false;

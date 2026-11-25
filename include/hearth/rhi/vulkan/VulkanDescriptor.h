@@ -1,9 +1,9 @@
 #pragma once
 
-#include "Platform/Vulkan/VulkanCommon.h"
-#include "Platform/Vulkan/Device/VulkanDevice.h"
+#include "hearth/rhi/vulkan/VulkanCommon.h"
+#include "hearth/rhi/vulkan/VulkanDevice.h"
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
 	class VulkanDescriptorSetLayout
 	{

@@ -1,11 +1,10 @@
-#include "tepch.h"
-#include "TinyEngine/RenderGraph/RenderGraph.h"
+#include "hearth/rhi/RenderGraph.h"
 #include "hearth/Assert.h"
 
 #include <algorithm>
+#include <memory>
 
-namespace TinyEngine {
-namespace rg {
+namespace hearth::rg {
 
 	using namespace rhi;
 
@@ -570,5 +569,4 @@ namespace rg {
 		RecordFinalStates();
 	}
 
-} // namespace rg
-} // namespace TinyEngine
+} // namespace hearth::rg

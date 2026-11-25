@@ -6,28 +6,28 @@
 // resource create/destroy surface; the frame-sync (P-A2) and bindless
 // (P-A3) rewrites land on top.
 
-#include "TinyEngine/RHI/RHI.h"
+#include "hearth/rhi/RHI.h"
 
-#include "Platform/Vulkan/VulkanCommon.h"
-#include "Platform/Vulkan/Device/VulkanDevice.h"
-#include "Platform/Vulkan/Resources/VulkanBuffer.h"
-#include "Platform/Vulkan/Resources/VulkanTexture.h"
-#include "Platform/Vulkan/Shaders/VulkanPipeline.h"
-#include "Platform/Vulkan/Shaders/VulkanShaderModule.h"
-#include "Platform/Vulkan/Device/VulkanSwapchain.h"
+#include "hearth/rhi/vulkan/VulkanCommon.h"
+#include "hearth/rhi/vulkan/VulkanDevice.h"
+#include "hearth/rhi/vulkan/VulkanBuffer.h"
+#include "hearth/rhi/vulkan/VulkanImage2D.h"
+#include "hearth/rhi/vulkan/VulkanPipeline.h"
+#include "hearth/rhi/vulkan/VulkanShaderModule.h"
+#include "hearth/rhi/vulkan/VulkanSwapchain.h"
 
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <vector>
 #include <atomic>
+#include <unordered_map>
 
 namespace hearth::platform { class Window; }
 
-namespace TinyEngine {
-namespace rhi {
+namespace hearth::rhi {
 
-	// The standalone sampler (the existing VulkanTexture2D bakes its own
+	// The standalone sampler (a VulkanImage2D bakes its own
 	// internally; this is the RHI's general form, consumed by the fixed
 	// sampler table in P-A3).
 	class VulkanSampler
@@ -115,12 +115,12 @@ namespace rhi {
 		VkImage Image = VK_NULL_HANDLE;
 	};
 
-	// One TextureHandle space: an entry is EITHER an owned VulkanTexture2D
+	// One TextureHandle space: an entry is EITHER an owned VulkanImage2D
 	// or a wrapped external image (never both - two tables sharing the same
 	// handle type would alias {index, generation} and mis-resolve).
 	struct VulkanTextureEntry
 	{
-		std::unique_ptr<VulkanTexture2D> Owned;
+		std::unique_ptr<VulkanImage2D> Owned;
 		std::unique_ptr<VulkanWrappedTexture> Wrapped;
 
 		bool IsWrapped() const { return Wrapped != nullptr; }
@@ -141,10 +141,10 @@ namespace rhi {
 		// for GLFW's instance-extension query), destroyed by the subsystem
 		// on shutdown.
 		void EnsureDevice(hearth::platform::Window* windowForExtensionQuery);
-		// Whether the driver pipeline cache persists to
-		// saved/cache/pipeline.bin: read when the device is created
-		// (loaded) and when it shuts down (written).
-		void SetPipelineCacheFile(bool enabled) { m_PipelineCacheFile = enabled; }
+		// Where the driver pipeline cache persists (empty: it does not): read
+		// when the device is created (loaded) and when it shuts down
+		// (written; its directory is made).
+		void SetPipelineCacheFile(std::string path) { m_PipelineCachePath = std::move(path); }
 		void ShutdownDevice();
 		VulkanDevice* GetVulkan() { return &m_Vulkan; }
 
@@ -278,7 +278,7 @@ namespace rhi {
 		PipelineHandle CreatePipeline(const PipelineStateDesc& desc, const char* debugName) override;
 		PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc, const char* debugName) override;
 		void DestroyPipeline(PipelineHandle handle) override;
-		void InvalidatePipelines(const AssetID& shaderAsset) override;
+		void InvalidatePipelines(const ShaderSourceId& source) override;
 
 		CommandListHandle CreateCommandList(QueueHandle queue, uint32_t threadIndex) override;
 		void DestroyCommandList(CommandListHandle handle) override;
@@ -553,7 +553,7 @@ namespace rhi {
 		// fragment shader handle); a hit returns the cached pipeline
 		// (refcounted so create-once/destroy-once callers stay balanced).
 		// Entries evict when either shader dies or when
-		// InvalidatePipelines names the shader's AssetID.
+		// InvalidatePipelines names the shader's source.
 		struct PipelineCacheEntry
 		{
 			PipelineHandle Handle;
@@ -597,11 +597,10 @@ namespace rhi {
 		void CreatePipelineCache();
 		void SavePipelineCache();
 
-		// The on-disk driver pipeline cache (saved/cache/pipeline.bin):
-		// whether to load it at creation and write it at shutdown, which
-		// the host sets before each (SetPipelineCacheFile).
+		// The on-disk driver pipeline cache: loaded at creation and written
+		// at shutdown when the program names a file (SetPipelineCacheFile).
 		VkPipelineCache m_VkPipelineCache = VK_NULL_HANDLE;
-		bool m_PipelineCacheFile = true;
+		std::string m_PipelineCachePath;
 		Table<CommandListHandle, VulkanCommandList> m_CommandLists;
 		Table<SwapchainHandle, VulkanSwapchain> m_Swapchains;
 
@@ -686,18 +685,4 @@ namespace rhi {
 		QueueHandle m_GraphicsQueue;
 	};
 
-} // namespace rhi
-
-// P-E: the entry points for Platform/Vulkan code to reach the RHI impl
-// (replaces the deleted VulkanDeviceRegistry shim). EnsureDevice is a
-// no-op once the first window has created the device - callers that may
-// run pre-window must go through the subsystem's EnsureDevice(window)
-// directly (the helper asserts without a window).
-rhi::VulkanRhiDevice& GetVulkanRhiDevice();
-
-inline VulkanDevice& GetVulkanDevice()
-{
-	return *GetVulkanRhiDevice().GetVulkan();
-}
-
-} // namespace TinyEngine
+} // namespace hearth::rhi

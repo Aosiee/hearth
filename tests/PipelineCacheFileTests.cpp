@@ -1,11 +1,10 @@
-#pragma once
 // The on-disk pipeline cache container - every damage class the
 // concurrent-instances race can produce must be rejected BEFORE the driver
 // sees the blob, and a save must never tear the file.
 
-#include "Platform/Vulkan/RHI/PipelineCacheFile.h"
+#include "hearth/rhi/vulkan/PipelineCacheFile.h"
 
-#include <doctest/doctest.h>
+#include "hamr/test.h"
 
 #include <algorithm>
 #include <atomic>
@@ -19,7 +18,7 @@
 
 namespace PipelineCacheFileTestsDetail {
 
-	using namespace TinyEngine::rhi;
+	using namespace hearth::rhi;
 
 	inline PipelineCacheIdentity MakeIdentity()
 	{
@@ -95,7 +94,9 @@ TEST_CASE("PipelineCacheFile: a same-size spliced file is rejected")
 	const std::vector<uint8_t> fileA = BuildPipelineCacheFile(a.data(), a.size(), id);
 	const std::vector<uint8_t> fileB = BuildPipelineCacheFile(b.data(), b.size(), id);
 
-	std::vector<uint8_t> spliced(fileA.begin(), fileA.begin() + 2048);
+	std::vector<uint8_t> spliced;
+	spliced.reserve(fileA.size());
+	spliced.insert(spliced.end(), fileA.begin(), fileA.begin() + 2048);
 	spliced.insert(spliced.end(), fileB.begin() + 2048, fileB.end());
 	REQUIRE(spliced.size() == fileA.size());
 	CHECK(Parse(spliced, id) == PipelineCacheFileStatus::HashMismatch);
@@ -121,7 +122,9 @@ TEST_CASE("PipelineCacheFile: the old UUID-prefixed format is not this format")
 	using namespace PipelineCacheFileTestsDetail;
 	const PipelineCacheIdentity id = MakeIdentity();
 	const std::vector<uint8_t> payload = MakePayload(id, 1024, 0x44);
-	std::vector<uint8_t> legacy(id.CacheUuid, id.CacheUuid + kPipelineCacheUuidSize);
+	std::vector<uint8_t> legacy;
+	legacy.reserve(kPipelineCacheUuidSize + payload.size());
+	legacy.insert(legacy.end(), id.CacheUuid, id.CacheUuid + kPipelineCacheUuidSize);
 	legacy.insert(legacy.end(), payload.begin(), payload.end());
 	CHECK(Parse(legacy, id) == PipelineCacheFileStatus::BadMagic);
 }

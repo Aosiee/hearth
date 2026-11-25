@@ -1,12 +1,11 @@
-#include "tepch.h"
-#include "Platform/Vulkan/Device/VulkanDevice.h"
+#include "hearth/rhi/vulkan/VulkanDevice.h"
+
+#include <optional>
 #include "hearth/Assert.h"
 #include "hearth/Log.h"
 #include "hearth/Zone.h"
 #include "hearth/Host.h"
-#include "Platform/Vulkan/Device/VulkanContext.h" // SetMainContext asserts the context's flag
-#include "TinyEngine/Profiler/GpuFrameDebugData.h"
-#include "TinyEngine/Profiler/Profiler.h"
+#include "hearth/rhi/GpuFrameDebugData.h"
 
 #include "loom/loom.h"
 
@@ -15,18 +14,18 @@
 #include <cstring>
 #include <thread>
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
 	namespace {
 
 
 		// The only validation layer used. If it isn't present on this machine
 		// (no Vulkan SDK / LunarG layers installed), startup carries on
-		// without it rather than refusing to start, the same way the engine
-		// doesn't refuse to start without a debugger attached. The whole
-		// debug-utils/validation machinery compiles out of TE_CONF_DIST
-		// builds (audit rows A4/A8).
-#if !defined(TE_CONF_DIST)
+		// without it rather than refusing to start, the same way a program does
+		// not refuse to start without a debugger attached. The whole
+		// debug-utils/validation machinery compiles out without HEARTH_GPU_DEBUG
+		// (a release program leaves it undefined).
+#if defined(HEARTH_GPU_DEBUG)
 		constexpr const char* g_ValidationLayerName = "VK_LAYER_KHRONOS_validation";
 
 		// Kept separate from the log itself (Log.h has no ring buffer, and
@@ -91,7 +90,7 @@ namespace TinyEngine {
 			// which is almost never what you want outside of a targeted test.
 			return VK_FALSE;
 		}
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 
 	}
 
@@ -104,7 +103,7 @@ namespace TinyEngine {
 		// requirement and the swapchain extension.
 		m_SurfaceEnabled = windowForExtensionQuery != nullptr;
 		// The creating thread is the game thread (the first window's
-		// VulkanContext::Init); the single-time commands and the upload
+		// window context's creation); the single-time commands and the upload
 		// batch assert it from here on.
 		m_GameThreadId = std::this_thread::get_id();
 
@@ -113,10 +112,10 @@ namespace TinyEngine {
 		CreateInstance(windowForExtensionQuery);
 		volkLoadInstance(m_Instance);
 
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 		if (m_ValidationEnabled)
 			CreateDebugMessenger();
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 
 		PickPhysicalDevice();
 		CreateLogicalDevice();
@@ -228,10 +227,10 @@ namespace TinyEngine {
 		if (m_Device != VK_NULL_HANDLE)
 			vkDestroyDevice(m_Device, nullptr);
 
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 		if (m_DebugMessenger != VK_NULL_HANDLE)
 			vkDestroyDebugUtilsMessengerEXT(m_Instance, m_DebugMessenger, nullptr);
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 
 		if (m_Instance != VK_NULL_HANDLE)
 			vkDestroyInstance(m_Instance, nullptr);
@@ -239,7 +238,7 @@ namespace TinyEngine {
 
 	bool VulkanDevice::CheckValidationLayerSupport() const
 	{
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 		uint32_t layerCount = 0;
 		vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
 
@@ -251,7 +250,7 @@ namespace TinyEngine {
 			if (strcmp(layer.layerName, g_ValidationLayerName) == 0)
 				return true;
 		}
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 
 		return false;
 	}
@@ -260,9 +259,9 @@ namespace TinyEngine {
 	{
 		VkApplicationInfo appInfo{};
 		appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-		appInfo.pApplicationName = "TinyEngine App";
+		appInfo.pApplicationName = m_ApplicationName.c_str();
 		appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-		appInfo.pEngineName = "TinyEngine";
+		appInfo.pEngineName = m_EngineName.c_str();
 		appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
 		// Vulkan 1.3 core is the baseline.
 		// Dynamic rendering and synchronization2 are both used unconditionally as core
@@ -299,7 +298,7 @@ namespace TinyEngine {
 		// validation messages raised by vkCreateInstance/vkDestroyInstance
 		// themselves are also caught, which the messenger object created
 		// afterwards would otherwise miss.
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 		VkDebugUtilsMessengerCreateInfoEXT messengerCreateInfo{};
 		if (m_ValidationEnabled)
 		{
@@ -322,14 +321,14 @@ namespace TinyEngine {
 
 			createInfo.pNext = &messengerCreateInfo;
 		}
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 
 		VK_CHECK(vkCreateInstance(&createInfo, nullptr, &m_Instance));
 
 		HEARTH_LOG_INFO(::hearth::LogVulkan, "Vulkan Instance Created (validation {0})", m_ValidationEnabled ? "enabled" : "disabled");
 	}
 
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 	void VulkanDevice::CreateDebugMessenger()
 	{
 		VkDebugUtilsMessengerCreateInfoEXT createInfo{};
@@ -344,7 +343,7 @@ namespace TinyEngine {
 
 		VK_CHECK(vkCreateDebugUtilsMessengerEXT(m_Instance, &createInfo, nullptr, &m_DebugMessenger));
 	}
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 
 	void VulkanDevice::PickPhysicalDevice()
 	{
@@ -446,7 +445,7 @@ namespace TinyEngine {
 
 	void VulkanDevice::DetectCalibratedTimestamps()
 	{
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 		if (!m_TimestampsSupported)
 			return;
 		uint32_t count = 0;
@@ -493,12 +492,12 @@ namespace TinyEngine {
 			return;
 		}
 		m_HostTimeDomain = host;
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 	}
 
 	void VulkanDevice::CalibrateGpuClock()
 	{
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 		VkCalibratedTimestampInfoKHR infos[2]{};
 		infos[0].sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR;
 		infos[0].timeDomain = VK_TIME_DOMAIN_DEVICE_KHR;
@@ -550,10 +549,13 @@ namespace TinyEngine {
 			next.PeriodNs = m_GpuPeriodEstimate;
 		m_GpuClock = next;
 		m_GpuClockValid = true;
-		TinyEngine::Profiler::Get().PlotValue("GPU clock error (us)", errorNs / 1000.0);
-		TinyEngine::Profiler::Get().PlotValue("GPU clock rate (ppm)",
-			(m_GpuPeriodEstimate > 0.0 ? m_GpuPeriodEstimate / (double)m_TimestampPeriodNs - 1.0 : 0.0) * 1.0e6);
-#endif // !TE_CONF_DIST
+		if (m_GpuTimingSink)
+		{
+			m_GpuTimingSink->PlotValue("GPU clock error (us)", errorNs / 1000.0);
+			m_GpuTimingSink->PlotValue("GPU clock rate (ppm)",
+				(m_GpuPeriodEstimate > 0.0 ? m_GpuPeriodEstimate / (double)m_TimestampPeriodNs - 1.0 : 0.0) * 1.0e6);
+		}
+#endif // HEARTH_GPU_DEBUG
 	}
 
 	void VulkanDevice::CreateLogicalDevice()
@@ -739,7 +741,7 @@ namespace TinyEngine {
 		}
 	}
 
-	uint32_t VulkanDevice::AllocateWindowSlot(VulkanContext* owner)
+	uint32_t VulkanDevice::AllocateWindowSlot(VulkanWindowContext* owner)
 	{
 		uint32_t slot = 0;
 		while (slot < MaxWindowSlots && m_WindowSlotClaimed[slot])
@@ -765,7 +767,7 @@ namespace TinyEngine {
 		m_WindowSlotClaimed[slot] = false;
 	}
 
-	void VulkanDevice::SetMainContext(VulkanContext* context)
+	void VulkanDevice::SetMainContext(VulkanWindowContext* context)
 	{
 		// Set-once - a second set (e.g. a secondary window claiming the main
 		// context, or a main window created twice) is a defect, not a silent
@@ -779,13 +781,13 @@ namespace TinyEngine {
 		m_MainContext = context;
 	}
 
-	void VulkanDevice::ClearMainContext(VulkanContext* context)
+	void VulkanDevice::ClearMainContext(VulkanWindowContext* context)
 	{
 		HEARTH_ASSERT(m_MainContext == context, "ClearMainContext from a context that is not the main context");
 		m_MainContext = nullptr;
 	}
 
-	VulkanContext& VulkanDevice::GetMainContext() const
+	VulkanWindowContext& VulkanDevice::GetMainContext() const
 	{
 		HEARTH_ASSERT(m_MainContext != nullptr, "GetMainContext() with no main context - the main window's context must exist in windowed flavors");
 		return *m_MainContext;
@@ -974,7 +976,7 @@ namespace TinyEngine {
 
 	void VulkanDevice::SetObjectName(VkObjectType type, uint64_t handle, const std::string& name) const
 	{
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 		if (!m_ValidationEnabled || !vkSetDebugUtilsObjectNameEXT)
 			return;
 
@@ -985,13 +987,13 @@ namespace TinyEngine {
 		nameInfo.pObjectName = name.c_str();
 
 		vkSetDebugUtilsObjectNameEXT(m_Device, &nameInfo);
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 		(void)type; (void)handle; (void)name;
 	}
 
 	void VulkanDevice::CmdBeginDebugLabel(VkCommandBuffer commandBuffer, uint32_t frameSlot, const std::string& name, const float colour[4], bool timed)
 	{
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 		if (m_ValidationEnabled && vkCmdBeginDebugUtilsLabelEXT)
 		{
 			VkDebugUtilsLabelEXT label{};
@@ -1044,13 +1046,13 @@ namespace TinyEngine {
 			m_ScopeBeginStack[threadKey].push_back(slot);
 			m_ScopeNameStack[threadKey].push_back(name);
 		}
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 		(void)commandBuffer; (void)frameSlot; (void)name; (void)colour; (void)timed;
 	}
 
 	void VulkanDevice::CmdEndDebugLabel(VkCommandBuffer commandBuffer, uint32_t frameSlot)
 	{
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 		if (m_TimestampsSupported)
 		{
 			HEARTH_ASSERT(frameSlot < TotalFrameSlots, "CmdEndDebugLabel frame index out of range!");
@@ -1084,11 +1086,11 @@ namespace TinyEngine {
 
 				if (endSlot != kNoTimestampSlot)
 				{
-#if !defined(TE_CONF_DIST)
-					uint32_t profilerFrame = TinyEngine::Profiler::Get().CurrentFrameIndex();
+#if defined(HEARTH_GPU_DEBUG)
+					uint32_t profilerFrame = m_GpuTimingSink ? m_GpuTimingSink->CurrentFrameIndex() : 0;
 #else
 					uint32_t profilerFrame = 0;
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 					m_RecordedScopes[threadKey].push_back({ scopeName, beginSlot, endSlot, profilerFrame });
 				}
 			}
@@ -1096,17 +1098,22 @@ namespace TinyEngine {
 
 		if (m_ValidationEnabled && vkCmdEndDebugUtilsLabelEXT)
 			vkCmdEndDebugUtilsLabelEXT(commandBuffer);
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 		(void)commandBuffer; (void)frameSlot;
 	}
 
 	void VulkanDevice::BeginProfilingFrame(uint32_t frameIndex, bool isMainWindow)
 	{
 		HEARTH_ASSERT(frameIndex < TotalFrameSlots, "BeginProfilingFrame frame index out of range!");
-#if !defined(TE_CONF_DIST)
-		GpuFrameDebugSink::Writer debug = GetGpuFrameDebugSink().Write();
-		GpuFrameDebugInfo& debugInfo = debug.Info;
-#endif // !TE_CONF_DIST
+#if defined(HEARTH_GPU_DEBUG)
+		// Without a frame debugger the readback still runs (the timing
+		// sink's pass times), into a scratch frame.
+		GpuFrameDebugInfo scratch;
+		std::optional<GpuFrameDebugSink::Writer> debug;
+		if (m_GpuFrameDebugSink)
+			debug.emplace(m_GpuFrameDebugSink->Write());
+		GpuFrameDebugInfo& debugInfo = debug ? debug->Info : scratch;
+#endif // HEARTH_GPU_DEBUG
 
 		// The counter keeps counting past the pool on an overflow frame (A10).
 		uint32_t queryCount = std::min(m_NextQuerySlot[frameIndex].load(std::memory_order_relaxed), kMaxTimestampsPerFrame);
@@ -1126,7 +1133,7 @@ namespace TinyEngine {
 
 			if (result == VK_SUCCESS)
 			{
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 				if (m_GetCalibratedTimestamps != nullptr && m_CalibrationCountdown-- == 0)
 				{
 					CalibrateGpuClock();
@@ -1147,27 +1154,27 @@ namespace TinyEngine {
 						float ms = (float)((double)deltaTicks * m_TimestampPeriodNs / 1000000.0);
 						debugInfo.PassTimings.push_back({ scope.Name, ms });
 
-#if !defined(TE_CONF_DIST)
-						if (m_GpuClockValid)
-							TinyEngine::Profiler::Get().GpuPassPair(0,
+#if defined(HEARTH_GPU_DEBUG)
+						if (m_GpuTimingSink && m_GpuClockValid)
+							m_GpuTimingSink->GpuPassPair(
 								m_GpuClock.ToCpuNs(timestamps[scope.BeginQuery] & m_TimestampMask),
 								m_GpuClock.ToCpuNs(timestamps[scope.EndQuery] & m_TimestampMask),
 								scope.ProfilerFrameIndex, scope.Name.c_str(), true);
-						else
-							TinyEngine::Profiler::Get().GpuPassPair(0,
+						else if (m_GpuTimingSink)
+							m_GpuTimingSink->GpuPassPair(
 								(uint64_t)((double)timestamps[scope.BeginQuery] * m_TimestampPeriodNs),
 								(uint64_t)((double)timestamps[scope.EndQuery] * m_TimestampPeriodNs),
-								scope.ProfilerFrameIndex, scope.Name.c_str());
-#endif // !TE_CONF_DIST
+								scope.ProfilerFrameIndex, scope.Name.c_str(), false);
+#endif // HEARTH_GPU_DEBUG
 					}
 				}
 
 				debugInfo.Available = true;
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 			}
 		}
 
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 		if (isMainWindow)
 		{
 			// The panel's "In-Flight Index" is the window's frame-in-flight
@@ -1197,7 +1204,7 @@ namespace TinyEngine {
 				out.BytesBudget = budgets[heap].budget;
 			}
 		}
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 
 		m_NextQuerySlot[frameIndex].store(0, std::memory_order_relaxed);
 		for (uint32_t thread = 0; thread < m_RecordThreadCount; thread++)
@@ -1222,14 +1229,14 @@ namespace TinyEngine {
 		return (uint32_t)index < m_RecordThreadCount ? (uint32_t)index : m_RecordThreadCount - 1;
 	}
 
-#if !defined(TE_CONF_DIST)
+#if defined(HEARTH_GPU_DEBUG)
 	void VulkanDevice::NoteTimestampOverflow()
 	{
 		if (!m_TimestampOverflowWarned.exchange(true, std::memory_order_relaxed))
 			HEARTH_LOG_WARN(::hearth::LogVulkan, "GPU timestamps: a frame recorded more than {0} timed scopes - the extra scopes keep their labels but go untimed (warned once).",
 				kMaxTimestampsPerFrame / 2);
 	}
-#endif // !TE_CONF_DIST
+#endif // HEARTH_GPU_DEBUG
 
 	void VulkanDevice::CmdResetTimestampPool(VkCommandBuffer commandBuffer, uint32_t frameIndex)
 	{

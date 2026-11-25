@@ -1,7 +1,6 @@
-#include "tepch.h"
-#include "Platform/Vulkan/Shaders/VulkanShaderModule.h"
+#include "hearth/rhi/vulkan/VulkanShaderModule.h"
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
 	void VulkanShaderModule::Init(VulkanDevice& device, const std::vector<uint32_t>& spirv, VkShaderStageFlagBits stage, const std::string& debugName)
 	{

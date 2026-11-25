@@ -8,16 +8,15 @@
 // timestamp pool, the per-slot draw queues), passed with the list instead
 // of read from a thread-local.
 
-#include "TinyEngine/RHI/Types.h"
-#include "TinyEngine/RHI/States.h"
-#include "TinyEngine/RHI/Format.h"
-#include "TinyEngine/RHI/BarrierDesc.h"
+#include "hearth/rhi/Types.h"
+#include "hearth/rhi/States.h"
+#include "hearth/rhi/Format.h"
+#include "hearth/rhi/BarrierDesc.h"
 
 #include <cstdint>
 #include <span>
 
-namespace TinyEngine {
-namespace rhi {
+namespace hearth::rhi {
 
 	// One dynamic-rendering attachment set (the backend uses dynamic
 	// rendering, so there are no render-pass objects).
@@ -104,5 +103,4 @@ namespace rhi {
 		uint32_t m_FrameSlot = 0;
 	};
 
-} // namespace rhi
-} // namespace TinyEngine
+} // namespace hearth::rhi

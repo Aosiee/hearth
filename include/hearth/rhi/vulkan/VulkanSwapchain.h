@@ -1,17 +1,17 @@
 #pragma once
 
-#include "Platform/Vulkan/VulkanCommon.h"
+#include "hearth/rhi/vulkan/VulkanCommon.h"
 #include "hearth/Assert.h"
-#include "Platform/Vulkan/Device/VulkanDevice.h"
-#include "TinyEngine/RHI/RHI.h"
+#include "hearth/rhi/vulkan/VulkanDevice.h"
+#include "hearth/rhi/RHI.h"
 
 #include <atomic>
 
 namespace hearth::platform { class Window; }
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
-	namespace rhi { class VulkanRhiDevice; }
+	class VulkanRhiDevice;
 
 	// Owns the window's VkSurfaceKHR, its VkSwapchainKHR, and the sync objects
 	// needed to safely acquire and present images. One of these exists per
@@ -110,7 +110,7 @@ namespace TinyEngine {
 
 		// P4-B: each swapchain image is adopted into the RHI as a
 		// barrier-target handle (the RenderGraph imports it per frame).
-		TinyEngine::rhi::TextureHandle GetImageHandle(uint32_t index) const
+		hearth::rhi::TextureHandle GetImageHandle(uint32_t index) const
 		{
 			HEARTH_ASSERT(index < m_ImageHandles.size(), "swapchain image index out of range");
 			return m_ImageHandles[index];
@@ -196,7 +196,7 @@ namespace TinyEngine {
 
 		std::vector<VkImage> m_Images;
 		std::vector<VkImageView> m_ImageViews;
-		std::vector<TinyEngine::rhi::TextureHandle> m_ImageHandles;
+		std::vector<hearth::rhi::TextureHandle> m_ImageHandles;
 
 		// Render finished semaphores are indexed by swapchain image, not frame in
 		// flight. Present operates on a specific image index, and acquiring images

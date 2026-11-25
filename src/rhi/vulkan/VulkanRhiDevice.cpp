@@ -1,21 +1,18 @@
-#include "tepch.h"
-#include "Platform/Vulkan/RHI/VulkanRhiDevice.h"
+#include "hearth/rhi/vulkan/VulkanRhiDevice.h"
 #include "hearth/Assert.h"
 #include "hearth/Log.h"
-#include "Platform/Vulkan/RHI/DescriptorLogUtil.h"
-#include "Platform/Vulkan/RHI/PipelineCacheFile.h"
-#include "Platform/Vulkan/Shaders/VulkanShaderReflection.h"
-#include "Platform/Vulkan/Device/VulkanContext.h" // the main context's GetCurrentFrameSlot (the retire queue's slot tag)
+#include "hearth/rhi/vulkan/DescriptorLogUtil.h"
+#include "hearth/rhi/vulkan/PipelineCacheFile.h"
+#include "hearth/rhi/vulkan/VulkanShaderReflection.h"
 
 #include <blake3.h>
 
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <cstring>
 
-namespace TinyEngine {
-
-namespace rhi {
+namespace hearth::rhi {
 
 	namespace {
 
@@ -203,7 +200,6 @@ namespace rhi {
 			return VK_ACCESS_2_NONE;
 		}
 
-		constexpr const char* kPipelineCachePath = "saved/cache/pipeline.bin";
 
 		PipelineCacheIdentity QueryPipelineCacheIdentity(VkPhysicalDevice physicalDevice)
 		{
@@ -219,7 +215,7 @@ namespace rhi {
 	} // namespace
 
 	// ---- VulkanSampler ----------------------------------------------------------
-	// The standalone sampler (the existing VulkanTexture2D bakes its own
+	// The standalone sampler (a VulkanImage2D bakes its own
 	// internally; this is the RHI's general form, consumed by the fixed
 	// sampler table in P-A3).
 
@@ -562,8 +558,8 @@ namespace rhi {
 		CreatePipelineCache();
 	}
 
-	// The driver pipeline cache (VkPipelineCache), persisted to
-	// saved/cache/pipeline.bin when r.shader.pipelineCacheFile is on. A
+	// The driver pipeline cache (VkPipelineCache), persisted to the
+	// program's file when it names one. A
 	// cache is disposable, so no file state may stop a launch - a rejected
 	// file is a cold start, and a blob the driver refuses (NVIDIA:
 	// VK_ERROR_UNKNOWN on a damaged body) too.
@@ -572,9 +568,9 @@ namespace rhi {
 		VkPipelineCacheCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
 		std::vector<uint8_t> cached;
-		if (m_PipelineCacheFile)
+		if (!m_PipelineCachePath.empty())
 		{
-			std::ifstream file(kPipelineCachePath, std::ios::binary);
+			std::ifstream file(m_PipelineCachePath, std::ios::binary);
 			if (file.is_open())
 			{
 				cached.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
@@ -589,14 +585,14 @@ namespace rhi {
 				}
 				else
 					HEARTH_LOG_WARN(::hearth::LogVulkan, "Pipeline cache: ignoring {0} ({1}), cold start.",
-						kPipelineCachePath, PipelineCacheFileStatusName(status));
+						m_PipelineCachePath, PipelineCacheFileStatusName(status));
 			}
 		}
 		VkResult result = vkCreatePipelineCache(m_Vulkan.GetDevice(), &info, nullptr, &m_VkPipelineCache);
 		if (result != VK_SUCCESS && info.initialDataSize != 0)
 		{
 			HEARTH_LOG_WARN(::hearth::LogVulkan, "Pipeline cache: the driver refused {0} (VkResult {1}), cold start.",
-				kPipelineCachePath, (int)result);
+				m_PipelineCachePath, (int)result);
 			info.initialDataSize = 0;
 			info.pInitialData = nullptr;
 			result = vkCreatePipelineCache(m_Vulkan.GetDevice(), &info, nullptr, &m_VkPipelineCache);
@@ -608,7 +604,7 @@ namespace rhi {
 	{
 		if (m_VkPipelineCache == VK_NULL_HANDLE)
 			return;
-		if (!m_PipelineCacheFile)
+		if (m_PipelineCachePath.empty())
 		{
 			vkDestroyPipelineCache(m_Vulkan.GetDevice(), m_VkPipelineCache, nullptr);
 			m_VkPipelineCache = VK_NULL_HANDLE;
@@ -621,9 +617,9 @@ namespace rhi {
 			VK_CHECK(vkGetPipelineCacheData(m_Vulkan.GetDevice(), m_VkPipelineCache, &size, blob.data()));
 		vkDestroyPipelineCache(m_Vulkan.GetDevice(), m_VkPipelineCache, nullptr);
 		m_VkPipelineCache = VK_NULL_HANDLE;
-		if (!WritePipelineCacheFileAtomic(kPipelineCachePath,
+		if (!WritePipelineCacheFileAtomic(m_PipelineCachePath,
 			BuildPipelineCacheFile(blob.data(), size, QueryPipelineCacheIdentity(m_Vulkan.GetPhysicalDevice()))))
-			HEARTH_LOG_WARN(::hearth::LogVulkan, "Pipeline cache: could not write {0}, the next launch is a cold start.", kPipelineCachePath);
+			HEARTH_LOG_WARN(::hearth::LogVulkan, "Pipeline cache: could not write {0}, the next launch is a cold start.", m_PipelineCachePath);
 	}
 
 	// The two fixed samplers Wisp picks from. Baked with Wisp's EXACT
@@ -826,7 +822,7 @@ namespace rhi {
 		// With no submits left the timeline never advances again: idle the
 		// device, drain everything queued so far, queue every still-live
 		// non-texture resource (the wrappers have no freeing destructors -
-		// only VulkanTexture2D/VulkanSwapchain release themselves through
+		// only VulkanImage2D/VulkanSwapchain release themselves through
 		// Clear), clear the handle tables, drain again, then hand the (now
 		// clean) device over to VulkanDevice::Shutdown.
 		vkDeviceWaitIdle(m_Vulkan.GetDevice());
@@ -1397,7 +1393,7 @@ namespace rhi {
 		// ShutdownDevice unconditional drain frees them.
 		AssertRetireQueueOwner("QueueRetire");
 		entry.Slot = 0;
-		if (VulkanContext* context = m_Vulkan.TryGetMainContext())
+		if (VulkanWindowContext* context = m_Vulkan.TryGetMainContext())
 			entry.Slot = context->GetCurrentFrameSlot();
 		entry.ResetTag = m_SlotResetCount[entry.Slot].load(std::memory_order_relaxed) + kRetireResetDistance;
 		m_RetireQueue.push_back(std::move(entry));
@@ -1680,7 +1676,7 @@ namespace rhi {
 		HEARTH_ASSERT(m_Initialized, "RHI texture created before the device");
 
 		TextureHandle handle = m_Textures.Acquire();
-		VulkanTexture2D* texture = nullptr;
+		VulkanImage2D* texture = nullptr;
 		// The graph-transient RENDER TARGET path - an attachment in the
 		// requested format, sampled back by the lighting/post passes. Depth
 		// transients are NOT needed (the G-buffer pass shares the target's
@@ -1689,7 +1685,7 @@ namespace rhi {
 		{
 			HEARTH_ASSERT(!desc.DepthTarget, "depth render-target transients unsupported - the G-buffer shares the target's D32");
 			HEARTH_ASSERT(desc.MipLevels == 1, "render-target transients are single-level");
-			texture = new VulkanTexture2D(desc.Width, desc.Height, ToVkFormat(desc.PixelFormat), false);
+			texture = new VulkanImage2D(*this, desc.Width, desc.Height, ToVkFormat(desc.PixelFormat), false);
 		}
 		else if (desc.MipLevels == 1)
 		{
@@ -1702,13 +1698,13 @@ namespace rhi {
 				levels.push_back(std::vector<uint8_t>((const uint8_t*)initialData, (const uint8_t*)initialData + dataSize));
 			else
 				levels.push_back(std::vector<uint8_t>((size_t)desc.Width * desc.Height * 4, 0));
-			texture = new VulkanTexture2D(desc.Width, desc.Height, levels);
+			texture = new VulkanImage2D(*this, desc.Width, desc.Height, levels);
 		}
 		else
 		{
-			texture = new VulkanTexture2D(desc.Width, desc.Height);
+			texture = new VulkanImage2D(*this, desc.Width, desc.Height);
 			if (initialData && dataSize > 0)
-				texture->SetData(const_cast<void*>(initialData), (uint32_t)dataSize);
+				texture->SetData(initialData, (uint32_t)dataSize);
 		}
 		std::unique_ptr<VulkanTextureEntry> entry = std::make_unique<VulkanTextureEntry>();
 		entry->Owned.reset(texture);
@@ -1735,7 +1731,7 @@ namespace rhi {
 		HEARTH_ASSERT(m_Initialized, "RHI texture created before the device");
 		TextureHandle handle = m_Textures.Acquire();
 		std::unique_ptr<VulkanTextureEntry> entry = std::make_unique<VulkanTextureEntry>();
-		entry->Owned.reset(new VulkanTexture2D(width, height, mipLevels));
+		entry->Owned.reset(new VulkanImage2D(*this, width, height, mipLevels));
 		m_Textures.Publish(handle, std::move(entry));
 		(void)debugName;
 		return handle;
@@ -1790,7 +1786,7 @@ namespace rhi {
 		// The wrapped-image path retires the view + slot only (the image is
 		// caller-owned; the fixed sampler must never enter a retire entry).
 		// Barrier-only adoptions have no view - nothing to retire. The owned
-		// path's Release invokes the queuing VulkanTexture2D dtor.
+		// path's Release invokes the queuing VulkanImage2D dtor.
 		if (VulkanTextureEntry* entry = m_Textures.Get(handle))
 		{
 			if (entry->IsWrapped() && entry->Wrapped->GetView() != VK_NULL_HANDLE)
@@ -1805,7 +1801,7 @@ namespace rhi {
 		if (VulkanTextureEntry* entry = m_Textures.Get(handle))
 		{
 			if (entry->Owned)
-				entry->Owned->SetData(const_cast<void*>(data), (uint32_t)size);
+				entry->Owned->SetData(data, (uint32_t)size);
 		}
 	}
 
@@ -2173,14 +2169,14 @@ namespace rhi {
 		HEARTH_ASSERT(pipelineReleased, "destroying an invalid/stale RHI pipeline");
 	}
 
-	void VulkanRhiDevice::InvalidatePipelines(const AssetID& shaderAsset)
+	void VulkanRhiDevice::InvalidatePipelines(const ShaderSourceId& source)
 	{
 		std::vector<PipelineCacheKey> evict;
 		for (const auto& [key, entry] : m_PipelineCache)
 		{
 			auto matchesAsset = [&](ShaderHandle handle) -> bool {
 				VulkanShaderModule* shader = m_Shaders.Get(handle);
-				return shader && shader->HasIdentity && shader->Identity.Asset == shaderAsset;
+				return shader && shader->HasIdentity && shader->Identity.Source == source;
 			};
 			if (matchesAsset(key.VertexShader) || matchesAsset(key.FragmentShader))
 				evict.push_back(key);
@@ -2318,7 +2314,7 @@ namespace rhi {
 	SwapchainHandle VulkanRhiDevice::CreateSwapchain(void* window)
 	{
 		// P-A2: wraps the per-window swapchain (now timeline-paced - the
-		// per-frame fences are gone). VulkanContext still drives the frame
+		// per-frame fences are gone). VulkanWindowContext still drives the frame
 		// loop through its own VulkanSwapchain instance; this is the RHI's
 		// owner API for per-window state (P-D's WispWindowRenderState).
 		EnsureDevice((hearth::platform::Window*)window);
@@ -2412,5 +2408,4 @@ namespace rhi {
 		return VK_NULL_HANDLE;
 	}
 
-} // namespace rhi
-} // namespace TinyEngine
+} // namespace hearth::rhi

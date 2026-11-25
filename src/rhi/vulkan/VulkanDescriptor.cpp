@@ -1,8 +1,7 @@
-#include "tepch.h"
-#include "Platform/Vulkan/Resources/VulkanDescriptor.h"
+#include "hearth/rhi/vulkan/VulkanDescriptor.h"
 #include "hearth/Log.h"
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
 	void VulkanDescriptorSetLayout::InitSingleCombinedImageSampler(VulkanDevice& device, VkShaderStageFlags stageFlags, const std::string& debugName)
 	{

@@ -12,7 +12,7 @@
 // body with VK_ERROR_UNKNOWN instead of ignoring it, and silently accepts
 // flipped body bytes), and a save can never be observed half-written by
 // another app instance.
-namespace TinyEngine::rhi {
+namespace hearth::rhi {
 
 	inline constexpr size_t kPipelineCacheUuidSize = 16; // VK_UUID_SIZE
 

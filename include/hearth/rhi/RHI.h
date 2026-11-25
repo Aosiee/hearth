@@ -5,9 +5,9 @@
 // Platform/Vulkan/RHI/ so the exit criterion "no backend identifiers
 // outside Platform/Vulkan/" stays literally true.
 
-#include "TinyEngine/RHI/Types.h"
-#include "TinyEngine/RHI/States.h"
-#include "TinyEngine/RHI/Format.h"
-#include "TinyEngine/RHI/BarrierDesc.h"
-#include "TinyEngine/RHI/CommandList.h"
-#include "TinyEngine/RHI/Device.h"
+#include "hearth/rhi/Types.h"
+#include "hearth/rhi/States.h"
+#include "hearth/rhi/Format.h"
+#include "hearth/rhi/BarrierDesc.h"
+#include "hearth/rhi/CommandList.h"
+#include "hearth/rhi/Device.h"

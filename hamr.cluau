@@ -1,14 +1,17 @@
 // Hearth's suite for hamr (github.com/Aosiee/hamr): `hamr run` here.
 //
 // Each configuration builds in its own build-hamr-<name> directory and runs
-// both suite binaries' cases side by side. The fast tier is GCC release and
+// the suite binaries' cases side by side. The fast tier is GCC release and
 // debug and a Clang release; the nightly tier adds the address,
-// undefined-behaviour and thread sanitizers and a build without zones.
+// undefined-behaviour and thread sanitizers and a build without zones and
+// the GPU developer tools. The GPU suite runs on whatever Vulkan device the
+// machine has (lavapipe in CI).
 //
 //     hamr run                       the fast tier
 //     hamr run --tier nightly        every configuration
 //     hamr run --set hamrDir=<dir>   a local hamr checkout instead of fetching
 //     hamr run --set glfwDir=<dir> --set vulkanHeadersDir=<dir>   the same for GLFW and Vulkan-Headers
+//     (and volkDir, vmaDir, loomDir, blake3Dir, spirvCrossDir for the GPU layer's)
 //
 // GLFW builds with its null platform only (the platform cases run on it), as
 // in CI: no display or window-system libraries needed.
@@ -22,6 +25,22 @@ const clang = suite:var("clang", "clang++")
 const hamrDir = suite:var("hamrDir", "")
 const glfwDir = suite:var("glfwDir", "")
 const vulkanHeadersDir = suite:var("vulkanHeadersDir", "")
+// The GPU layer's libraries, the same way: volkDir, vmaDir, loomDir,
+// blake3Dir, spirvCrossDir.
+const libraryDirs: { { name: string, option: string } } = {
+	{ name = "volkDir", option = "HEARTH_VOLK_DIR" },
+	{ name = "vmaDir", option = "HEARTH_VMA_DIR" },
+	{ name = "loomDir", option = "HEARTH_LOOM_DIR" },
+	{ name = "blake3Dir", option = "HEARTH_BLAKE3_DIR" },
+	{ name = "spirvCrossDir", option = "HEARTH_SPIRV_CROSS_DIR" },
+}
+const libraryFlags: { string } = {}
+for (_, library in libraryDirs) {
+	const dir = suite:var(library.name, "")
+	if (dir != "") {
+		table.insert(libraryFlags, `-D{library.option}={dir}`)
+	}
+}
 
 type Config = { name: string, cxx: string, type: string, flags: { string }, tier: string, sanitizer: string? }
 
@@ -29,7 +48,7 @@ const configs: { Config } = {
 	{ name = "gcc-release", cxx = gcc, type = "Release", flags = {}, tier = "fast" },
 	{ name = "gcc-debug", cxx = gcc, type = "Debug", flags = {}, tier = "fast" },
 	{ name = "clang-release", cxx = clang, type = "Release", flags = {}, tier = "fast" },
-	{ name = "no-zones", cxx = gcc, type = "Debug", flags = { "-DHEARTH_NO_ZONES=ON" }, tier = "nightly" },
+	{ name = "no-zones", cxx = gcc, type = "Debug", flags = { "-DHEARTH_NO_ZONES=ON", "-DHEARTH_GPU_DEBUG=OFF" }, tier = "nightly" },
 	{ name = "asan", cxx = gcc, type = "RelWithDebInfo", flags = { "-DHEARTH_SANITIZE=address" }, tier = "nightly", sanitizer = "address" },
 	{ name = "ubsan", cxx = gcc, type = "RelWithDebInfo", flags = { "-DHEARTH_SANITIZE=undefined" }, tier = "nightly", sanitizer = "undefined" },
 	{ name = "tsan", cxx = gcc, type = "RelWithDebInfo", flags = { "-DHEARTH_SANITIZE=thread" }, tier = "nightly", sanitizer = "thread" },
@@ -57,6 +76,9 @@ for (_, c in configs) {
 			if (vulkanHeadersDir != "") {
 				table.insert(configure, `-DHEARTH_VULKAN_HEADERS_DIR={vulkanHeadersDir}`)
 			}
+			for (_, flag in libraryFlags) {
+				table.insert(configure, flag)
+			}
 			for (_, flag in c.flags) {
 				table.insert(configure, flag)
 			}
@@ -64,7 +86,13 @@ for (_, c in configs) {
 			ctx:run({ "cmake", "--build", dir, "-j", tostring(host.cores()) })
 		},
 	})
-	for (_, binary in { "hearth_tests", "hearth_platform_tests", "hearth_default_host_tests" }) {
+	// The GPU suite needs a Vulkan device; not under the sanitizers (the
+	// driver is not built with them).
+	const binaries = { "hearth_tests", "hearth_platform_tests", "hearth_default_host_tests", "hearth_rhi_tests" }
+	if (c.sanitizer == nil) {
+		table.insert(binaries, "hearth_rhi_gpu_tests")
+	}
+	for (_, binary in binaries) {
 		hamr.tests(suite, `{binary}:{c.name}`, {
 			doc = "The suite, each case in its own worker process.",
 			tier = c.tier,

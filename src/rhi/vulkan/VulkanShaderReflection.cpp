@@ -1,10 +1,9 @@
-#include "tepch.h"
-#include "Platform/Vulkan/Shaders/VulkanShaderReflection.h"
+#include "hearth/rhi/vulkan/VulkanShaderReflection.h"
 #include "hearth/Zone.h"
 
 #include <spirv_cross.hpp>
 
-namespace TinyEngine {
+namespace hearth::rhi {
 
 	VulkanShaderReflectionInfo VulkanShaderReflection::Reflect(const std::vector<uint32_t>& spirv)
 	{

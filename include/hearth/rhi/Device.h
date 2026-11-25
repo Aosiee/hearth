@@ -6,10 +6,10 @@
 // deferred through the retire queue once the persistent bindless set
 // lands.
 
-#include "TinyEngine/RHI/Types.h"
-#include "TinyEngine/RHI/States.h"
-#include "TinyEngine/RHI/Format.h"
-#include "TinyEngine/RHI/BarrierDesc.h"
+#include "hearth/rhi/Types.h"
+#include "hearth/rhi/States.h"
+#include "hearth/rhi/Format.h"
+#include "hearth/rhi/BarrierDesc.h"
 
 #include <cstdint>
 #include <span>
@@ -17,8 +17,7 @@
 #include <string_view>
 #include <vector>
 
-namespace TinyEngine {
-namespace rhi {
+namespace hearth::rhi {
 
 	class CommandList;
 
@@ -182,9 +181,9 @@ namespace rhi {
 		virtual ShaderReloadResult ReloadShader(std::string_view name, std::span<const uint32_t> spirv) = 0;
 
 		// Destroys + evicts every cached pipeline that references
-		// a shader loaded from `shaderAsset` (shader hot reload calls this
+		// a shader from `source` (shader hot reload calls this
 		// before the new shader handles exist).
-		virtual void InvalidatePipelines(const AssetID& shaderAsset) = 0;
+		virtual void InvalidatePipelines(const ShaderSourceId& source) = 0;
 
 		virtual PipelineHandle CreatePipeline(const PipelineStateDesc& desc, const char* debugName) = 0;
 		// The same pipeline table, cache, invalidation and in-place shader
@@ -219,5 +218,4 @@ namespace rhi {
 		virtual void DestroySwapchain(SwapchainHandle handle) = 0;
 	};
 
-} // namespace rhi
-} // namespace TinyEngine
+} // namespace hearth::rhi

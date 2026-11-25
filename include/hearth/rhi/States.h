@@ -6,8 +6,7 @@
 
 #include <cstdint>
 
-namespace TinyEngine {
-namespace rhi {
+namespace hearth::rhi {
 
 	enum class TextureState : uint8_t
 	{
@@ -140,5 +139,4 @@ namespace rhi {
 		Nearest,
 	};
 
-} // namespace rhi
-} // namespace TinyEngine
+} // namespace hearth::rhi

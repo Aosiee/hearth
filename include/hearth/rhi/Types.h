@@ -8,10 +8,8 @@
 
 #include <cstdint>
 
-#include "assetio/AssetID.h"
 
-namespace TinyEngine {
-namespace rhi {
+namespace hearth::rhi {
 
 	struct Handle
 	{
@@ -26,12 +24,21 @@ namespace rhi {
 	struct SamplerHandle      : Handle {};
 	struct ShaderHandle       : Handle {};
 
-	// The asset-side identity of a shader (the AssetID it was
-	// loaded from + the permutation variant key, 0 = no variants). Stored
-	// on the shader entry; Device::InvalidatePipelines keys on it.
+	// The identity of a shader's source, chosen by the program (its asset
+	// id, say): 128 bits, all zero for none. Pipelines built from the source
+	// are found by it (Device::InvalidatePipelines).
+	struct ShaderSourceId
+	{
+		uint64_t High = 0;
+		uint64_t Low = 0;
+		bool operator==(const ShaderSourceId&) const = default;
+	};
+
+	// A shader's identity: its source and the permutation variant key (0 =
+	// no variants). Stored on the shader entry.
 	struct ShaderIdentity
 	{
-		AssetID Asset;
+		ShaderSourceId Source;
 		uint64_t VariantKey = 0;
 	};
 	struct PipelineHandle     : Handle {};
@@ -41,5 +48,4 @@ namespace rhi {
 
 	inline bool IsValid(const Handle& handle) { return handle.Index != ~0u; }
 
-} // namespace rhi
-} // namespace TinyEngine
+} // namespace hearth::rhi
