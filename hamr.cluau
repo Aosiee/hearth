@@ -8,6 +8,10 @@
 //     hamr run                       the fast tier
 //     hamr run --tier nightly        every configuration
 //     hamr run --set hamrDir=<dir>   a local hamr checkout instead of fetching
+//     hamr run --set glfwDir=<dir> --set vulkanHeadersDir=<dir>   the same for GLFW and Vulkan-Headers
+//
+// GLFW builds with its null platform only (the platform cases run on it), as
+// in CI: no display or window-system libraries needed.
 
 const hamr = require("@hamr")
 type Context = hamr.Context
@@ -16,6 +20,8 @@ const suite = hamr.suite("hearth", { budgets = { fast = 120, nightly = 480 } })
 const gcc = suite:var("gcc", "g++")
 const clang = suite:var("clang", "clang++")
 const hamrDir = suite:var("hamrDir", "")
+const glfwDir = suite:var("glfwDir", "")
+const vulkanHeadersDir = suite:var("vulkanHeadersDir", "")
 
 type Config = { name: string, cxx: string, type: string, flags: { string }, tier: string, sanitizer: string? }
 
@@ -41,9 +47,15 @@ for (_, c in configs) {
 		budget = if (c.sanitizer != nil) 60 else 30,
 		paths = kPaths,
 		run = function(ctx: Context) {
-			const configure = { "cmake", "-S", ".", "-B", dir, "-G", "Ninja", `-DCMAKE_BUILD_TYPE={c.type}`, `-DCMAKE_CXX_COMPILER={c.cxx}` }
+			const configure = { "cmake", "-S", ".", "-B", dir, "-G", "Ninja", `-DCMAKE_BUILD_TYPE={c.type}`, `-DCMAKE_CXX_COMPILER={c.cxx}`, "-DHEARTH_NULL_PLATFORM_ONLY=ON" }
 			if (hamrDir != "") {
 				table.insert(configure, `-DHEARTH_HAMR_DIR={hamrDir}`)
+			}
+			if (glfwDir != "") {
+				table.insert(configure, `-DHEARTH_GLFW_DIR={glfwDir}`)
+			}
+			if (vulkanHeadersDir != "") {
+				table.insert(configure, `-DHEARTH_VULKAN_HEADERS_DIR={vulkanHeadersDir}`)
 			}
 			for (_, flag in c.flags) {
 				table.insert(configure, flag)
@@ -52,7 +64,7 @@ for (_, c in configs) {
 			ctx:run({ "cmake", "--build", dir, "-j", tostring(host.cores()) })
 		},
 	})
-	for (_, binary in { "hearth_tests", "hearth_default_host_tests" }) {
+	for (_, binary in { "hearth_tests", "hearth_platform_tests", "hearth_default_host_tests" }) {
 		hamr.tests(suite, `{binary}:{c.name}`, {
 			doc = "The suite, each case in its own worker process.",
 			tier = c.tier,
