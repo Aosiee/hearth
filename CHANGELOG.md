@@ -4,7 +4,9 @@ Each release is an annotated tag (`v0.x.0`, or `v0.x.y` for a release of
 fixes only) whose message is the entry below. Versions before 1.0 may change
 the API; every entry says what callers need to change.
 
-## Unreleased
+## 0.4.0
+
+The frame loop: TinyEngine's run loop, as `hearth::Loop`.
 
 - `hearth::Loop` (`hearth/Loop.h`): the frame loop. Fixed phases
   (BeginFrame, Pump, Events, Input, Update, Fixed, Simulate, Present,
@@ -14,6 +16,9 @@ the API; every entry says what callers need to change.
   clients registered to run paused, from inside a running frame; a
   profiler zone per client; the order logged at the start.
 - `hearth::core` gains its first source and becomes a static library.
+
+Nothing changes for callers of 0.3 who link `hearth::core` through CMake;
+a build that compiles Hearth's sources itself adds `src/core/*.cpp`.
 
 ## 0.3.0
 
