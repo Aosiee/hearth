@@ -15,8 +15,8 @@ Hearth is being built in stages. Today it is the **host seam** (how Hearth
 and the libraries on it log, assert, profile and report a GPU without
 depending on the program's own logging, profiler or crash reporter) and the
 **platform** (windows, events, input, the clipboard, gamepads, Vulkan
-surfaces) and the **GPU layer** (a Vulkan device behind a small RHI, and a
-render graph). The frame loop follows.
+surfaces) and the **GPU layer** (a Vulkan device behind a small RHI, a render
+graph, and the presenter that runs a window's frame). The frame loop follows.
 
 Hearth was written for [TinyEngine](https://github.com/Aosiee/TinyEngine)
 and knows nothing about it.
@@ -113,9 +113,38 @@ graph.Execute(device, list);
   goes to the retire queue and is freed once its frame slot has been
   reset; a bindless index is reused only after every slot has seen it
   cleared.
-- **The program's windows** implement `VulkanWindowContext` (main or not,
-  the slot being built); the program's per-window frame records and
-  presents.
+- **A window's frame** is a `WindowPresenter` (`hearth/rhi/vulkan/WindowPresenter.h`):
+  its swapchain (none offscreen), its frame slots, and a submit thread that
+  acquires, records, submits and presents while the loop thread builds the
+  next frame. What a frame draws comes from its `FrameClient`s, called in
+  order at fixed points: an update on the loop thread, the publish into
+  the frame's slot, then on the submit thread the client's own graphs and
+  its passes into the swapchain graph. A client that needs every window's
+  GPU work idle (a shader reload) asks for the park first.
+
+```cpp
+class Scene final : public rhi::FrameClient
+{
+    void Update(const rhi::FrameUpdate& update) override { /* build the frame */ }
+    void RecordSwapchain(rhi::SwapchainGraph& swapchain, const rhi::FrameRecord&) override
+    {
+        auto& pass = swapchain.Graph().AddPass("Scene");
+        pass.Write(swapchain.Image(), rhi::TextureState::RenderTarget);
+        pass.SetExecute([&swapchain](rhi::CommandList& list, const rg::PassResources&) {
+            auto& vk = static_cast<rhi::VulkanCommandList&>(list);
+            swapchain.BeginRendering(vk, false);
+            // draw
+            vkCmdEndRendering(vk.GetCommandBuffer());
+        });
+    }
+};
+
+rhi::WindowPresenter presenter(device, { .Window = window, .IsMainWindow = true });
+rhi::FrameClient* clients[] = { &scene, &ui };
+presenter.SetClients(clients);
+while (running)
+    presenter.Present();
+```
 - **Developer tools** (validation layers, object names, debug labels, GPU
   timestamps for the program's profiler and frame debugger) build with
   `HEARTH_GPU_DEBUG` (`-DHEARTH_GPU_DEBUG=OFF` leaves them out).

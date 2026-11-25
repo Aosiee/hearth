@@ -154,6 +154,8 @@ namespace hearth::rhi {
 			HEARTH_ASSERT(m_GpuFrameDebugSink, "VulkanDevice: the GPU frame debug sink was never set (set it before Init)");
 			return *m_GpuFrameDebugSink;
 		}
+		// Null when the program set none.
+		GpuFrameDebugSink* TryGetGpuFrameDebugSink() const { return m_GpuFrameDebugSink; }
 #endif
 
 		// Anisotropic filtering is an optional device feature, not something

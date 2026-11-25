@@ -196,8 +196,9 @@ if(HEARTH_BUILD_TESTS)
     hearth_flags(hearth_rhi_tests)
 
     # The GPU layer on a device (lavapipe in CI): an offscreen device, a
-    # compute dispatch read back, the bindless retire.
-    add_executable(hearth_rhi_gpu_tests tests/main.cpp tests/RhiGpuTests.cpp)
+    # compute dispatch read back, the bindless retire, an offscreen
+    # presenter and its clients.
+    add_executable(hearth_rhi_gpu_tests tests/main.cpp tests/RhiGpuTests.cpp tests/PresenterGpuTests.cpp)
     target_include_directories(hearth_rhi_gpu_tests PRIVATE tests "${HEARTH_HAMR_SOURCE}/include")
     target_link_libraries(hearth_rhi_gpu_tests PRIVATE hearth_rhi hearth_default_host)
     hearth_flags(hearth_rhi_gpu_tests)
