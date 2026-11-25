@@ -15,7 +15,8 @@ Hearth is being built in stages. Today it is the **host seam** (how Hearth
 and the libraries on it log, assert, profile and report a GPU without
 depending on the program's own logging, profiler or crash reporter) and the
 **platform** (windows, events, input, the clipboard, gamepads, Vulkan
-surfaces). The frame loop and the GPU layer follow.
+surfaces) and the **GPU layer** (a Vulkan device behind a small RHI, and a
+render graph). The frame loop follows.
 
 Hearth was written for [TinyEngine](https://github.com/Aosiee/TinyEngine)
 and knows nothing about it.
@@ -80,11 +81,51 @@ for (bool running = true; running;)
 - **Capabilities** say what the window system allows: Wayland, for one,
   lets no program place its windows or read their positions.
 
+## The GPU layer
+
+`hearth::rhi` is a Vulkan 1.3 device behind a small interface
+(`hearth/rhi/Device.h`, `CommandList.h`): buffers, images, samplers,
+shaders, graphics and compute pipelines, command lists, submits on one
+graphics timeline. `hearth::rg` is a render graph over it: passes declare
+what they read and write, and the graph orders them, culls the unused ones
+and derives every barrier.
+
+```cpp
+#include "hearth/rhi/RenderGraph.h"
+
+rg::RenderGraph graph(pool);
+rg::RGBuffer target = graph.ImportBuffer(buffer, rhi::BufferState::Undefined);
+auto& fill = graph.AddPass("Fill");
+fill.Write(target, rhi::BufferState::ComputeWrite);
+fill.SetExecute([&](rhi::CommandList& list, const rg::PassResources&) {
+    list.BindPipeline(pipeline);
+    list.BindGlobalSet();
+    list.Dispatch(groups, 1, 1);
+});
+graph.Compile();
+graph.Execute(device, list);
+```
+
+- **One bindless set per frame slot.** Every texture and storage buffer
+  has an index in it; a write reaches a slot's set when that slot next
+  starts recording, so writing a live index is always safe.
+- **Nothing is destroyed while a frame may use it.** A destroyed object
+  goes to the retire queue and is freed once its frame slot has been
+  reset; a bindless index is reused only after every slot has seen it
+  cleared.
+- **The program's windows** implement `VulkanWindowContext` (main or not,
+  the slot being built); the program's per-window frame records and
+  presents.
+- **Developer tools** (validation layers, object names, debug labels, GPU
+  timestamps for the program's profiler and frame debugger) build with
+  `HEARTH_GPU_DEBUG` (`-DHEARTH_GPU_DEBUG=OFF` leaves them out).
+
 ## Building
 
 C++20 (`std::format`), GLFW (TinyEngine's fork, fetched at its pinned
-commit) and Vulkan-Headers for the platform, and for the suite hamr's C++
-test library. Linux is what is checked today;
+commit) and Vulkan-Headers for the platform; volk, the Vulkan Memory
+Allocator, loom, BLAKE3 and SPIRV-Cross for the GPU layer; and for the
+suite hamr's C++ test library. Linux is what is checked today;
 `-DHEARTH_NULL_PLATFORM_ONLY=ON` builds GLFW with its null platform alone
 (no window-system libraries, as CI does).
 
@@ -92,12 +133,14 @@ test library. Linux is what is checked today;
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 build/hearth_tests && build/hearth_platform_tests && build/hearth_default_host_tests
+build/hearth_rhi_tests && build/hearth_rhi_gpu_tests   # the second needs a Vulkan device
 ```
 
-hamr is fetched at the commit `CMakeLists.txt` pins; `-DHEARTH_HAMR_DIR=<dir>`
-uses a local checkout. A host build adds Hearth with `add_subdirectory` and
-links `hearth::core` (plus `hearth::default_host` if it has no host of its
-own). The full suite, side by side and in every configuration, runs
+Each dependency is fetched at the commit or tag `CMakeLists.txt` pins;
+`-DHEARTH_<NAME>_DIR=<dir>` uses a local checkout. A host build adds Hearth
+with `add_subdirectory` and links `hearth::core`, `hearth::platform` or
+`hearth::rhi` (plus `hearth::default_host` if it has no host of its own).
+The GPU suite runs on any Vulkan 1.3 device; CI uses Mesa's lavapipe. The full suite, side by side and in every configuration, runs
 through [hamr](https://github.com/Aosiee/hamr): `hamr run` (`--tier
 nightly` adds the sanitizers).
 

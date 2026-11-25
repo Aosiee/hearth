@@ -4,6 +4,24 @@ Each release is an annotated tag (`v0.x.0`, or `v0.x.y` for a release of
 fixes only) whose message is the entry below. Versions before 1.0 may change
 the API; every entry says what callers need to change.
 
+## Unreleased
+
+- `hearth::rhi`: the GPU layer, moved here from TinyEngine with its
+  history. The RHI interface (`Device`, `CommandList`, states, formats,
+  barriers), the render graph (`hearth::rg`), and their Vulkan 1.3
+  implementation: the device and its graphics timeline, swapchains,
+  pipelines and the pipeline cache (with its on-disk file), shader modules
+  and reflection, buffers, `VulkanImage2D`, the per-slot bindless set and
+  its write log, the retire queue.
+- `VulkanWindowContext`: what the device needs from the program's windows.
+- `GpuTimingSink` and the optional `GpuFrameDebugSink`: GPU timing and
+  frame data for the program's profiler and frame debugger.
+- `HEARTH_GPU_DEBUG`: the developer tools, on by default.
+- New dependencies, fetched at pins: volk, the Vulkan Memory Allocator,
+  loom, BLAKE3, SPIRV-Cross.
+- The suite gains `hearth_rhi_tests` and `hearth_rhi_gpu_tests` (run on
+  Mesa's lavapipe in CI).
+
 ## 0.1.1
 
 - GLFW is fetched at the fork's reworded commit (`21b45cdf`, the same
