@@ -15,8 +15,9 @@ Hearth is being built in stages. Today it is the **host seam** (how Hearth
 and the libraries on it log, assert, profile and report a GPU without
 depending on the program's own logging, profiler or crash reporter) and the
 **platform** (windows, events, input, the clipboard, gamepads, Vulkan
-surfaces) and the **GPU layer** (a Vulkan device behind a small RHI, a render
-graph, and the presenter that runs a window's frame). The frame loop follows.
+surfaces), the **frame loop** (fixed phases the program's steps register
+into) and the **GPU layer** (a Vulkan device behind a small RHI, a render
+graph, and the presenter that runs a window's frame).
 
 Hearth was written for [TinyEngine](https://github.com/Aosiee/TinyEngine)
 and knows nothing about it.
@@ -50,6 +51,41 @@ void CreateDevice()
   unless `-DHEARTH_NO_ZONES=ON`).
 - **Categories** are read-only names, so declaring one creates no global
   anything can write.
+
+## The frame loop
+
+`hearth::Loop` (`include/hearth/Loop.h`, in `hearth::core`) runs frames in
+fixed phases: BeginFrame, Pump, Events, Input, Update, Fixed, Simulate,
+Present, EndFrame. A program registers each of its per-frame steps as a
+client of a phase, ordered by a key; the loop owns the clock, the frame's
+number and delta, the fixed-step accumulator and the frame cap.
+
+```cpp
+#include "hearth/Loop.h"
+
+hearth::Loop loop;
+loop.SetFixedStep(1.0 / 60.0, 8);   // at most 8 steps a frame; the rest is dropped
+loop.SetFrameCap(1.0 / 144.0);
+loop.Add(hearth::Phase::Pump, 100, "pump", [&](const hearth::Frame&) { platform.Pump(); }, { .RunsPaused = true });
+loop.Add(hearth::Phase::Update, 100, "game.update", [&](const hearth::Frame& frame) { game.Update(frame.Delta); });
+loop.AddFixed(100, "game.step", [&](const hearth::Frame&, const hearth::FixedStep& step) { game.Step(step.Step); });
+loop.Add(hearth::Phase::Present, 100, "present", [&](const hearth::Frame&) { presenter.Present(); }, { .RunsPaused = true });
+loop.Run();                         // until loop.Stop()
+```
+
+- **The order** is logged when the loop starts (`LogLoop`); a key another
+  client of the phase holds, or a name another client holds, is refused.
+  `Order()` lists it, so a program can check it against what it expects.
+- **Fixed** runs its clients once per fixed step: none, one or several a
+  frame, each seeing the step's tick and the time still to step.
+- **Paused frames** (`RunPaused(keepPaused)`, called from a client) run
+  every phase but Fixed and Simulate, with only the clients registered
+  with `RunsPaused`: a script debugger keeps the window responsive this
+  way while the simulation stands still.
+- **Zones:** each client runs in a profiler zone named by it
+  (`.Zone = false` opts out).
+- `SetClock`, `SetSleep` and `SetFixedDelta` make a run deterministic (a
+  capture) or testable.
 
 ## The platform
 

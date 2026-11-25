@@ -64,16 +64,18 @@ function(hearth_flags target)
     endif()
 endfunction()
 
-# hearth::core - the host seam and the log, assert and zone macros. Asserts
-# are checked in Debug builds; zones are on unless HEARTH_NO_ZONES.
-add_library(hearth_core INTERFACE)
+# hearth::core - the host seam, the log, assert and zone macros, and the
+# frame loop. Asserts are checked in Debug builds; zones are on unless
+# HEARTH_NO_ZONES.
+add_library(hearth_core STATIC src/core/Loop.cpp)
 add_library(hearth::core ALIAS hearth_core)
-target_include_directories(hearth_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_compile_features(hearth_core INTERFACE cxx_std_20)
-target_compile_definitions(hearth_core INTERFACE $<$<CONFIG:Debug>:HEARTH_ENABLE_ASSERTS>)
+target_include_directories(hearth_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(hearth_core PUBLIC cxx_std_20)
+target_compile_definitions(hearth_core PUBLIC $<$<CONFIG:Debug>:HEARTH_ENABLE_ASSERTS>)
 if(NOT HEARTH_NO_ZONES)
-    target_compile_definitions(hearth_core INTERFACE HEARTH_ENABLE_ZONES)
+    target_compile_definitions(hearth_core PUBLIC HEARTH_ENABLE_ZONES)
 endif()
+hearth_flags(hearth_core)
 
 # hearth::platform - windows, events, input, the clipboard, gamepads and
 # Vulkan surfaces, on GLFW (the only Hearth code that includes it).
@@ -180,7 +182,7 @@ if(HEARTH_BUILD_TESTS)
         set(HEARTH_HAMR_SOURCE "${hamr_SOURCE_DIR}")
     endif()
 
-    add_executable(hearth_tests tests/main.cpp tests/TestHost.cpp tests/HostTests.cpp tests/DisabledTests.cpp)
+    add_executable(hearth_tests tests/main.cpp tests/TestHost.cpp tests/HostTests.cpp tests/DisabledTests.cpp tests/LoopTests.cpp)
     target_include_directories(hearth_tests PRIVATE tests "${HEARTH_HAMR_SOURCE}/include")
     target_link_libraries(hearth_tests PRIVATE hearth_core)
     hearth_flags(hearth_tests)

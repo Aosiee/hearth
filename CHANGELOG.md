@@ -4,6 +4,17 @@ Each release is an annotated tag (`v0.x.0`, or `v0.x.y` for a release of
 fixes only) whose message is the entry below. Versions before 1.0 may change
 the API; every entry says what callers need to change.
 
+## Unreleased
+
+- `hearth::Loop` (`hearth/Loop.h`): the frame loop. Fixed phases
+  (BeginFrame, Pump, Events, Input, Update, Fixed, Simulate, Present,
+  EndFrame) whose clients run in the order of their keys; the clock, the
+  frame's number and delta (measured or pinned), the fixed steps with
+  their per-frame cap, the frame cap; paused frames that run only the
+  clients registered to run paused, from inside a running frame; a
+  profiler zone per client; the order logged at the start.
+- `hearth::core` gains its first source and becomes a static library.
+
 ## 0.3.0
 
 A window's frame: TinyEngine's window presenter, as
