@@ -4,6 +4,27 @@ Each release is an annotated tag (`v0.x.0`, or `v0.x.y` for a release of
 fixes only) whose message is the entry below. Versions before 1.0 may change
 the API; every entry says what callers need to change.
 
+## 0.3.0
+
+A window's frame: TinyEngine's window presenter, as
+`hearth::rhi::WindowPresenter`.
+
+- `WindowPresenter`: one window's frame on the GPU. It owns the window's
+  swapchain (none for an offscreen window), its frame slots on the device,
+  the submit thread that acquires, records, submits and presents, and the
+  parks that wait for every window.
+- `FrameClient`: what a frame draws, supplied by the program as clients the
+  presenter calls in order at fixed points: the park, the update, the
+  publish, the target and swapchain records, and the end of the frame.
+  `SwapchainGraph` is the swapchain's render graph, which the presenter
+  opens with the clear and closes with the present transition.
+- `VulkanDevice::TryGetGpuFrameDebugSink`: the frame-debug sink is
+  optional, and the presenter writes frame data only when one is set.
+- `hearth_rhi_gpu_tests` gains the presenter's cases: the clients' order
+  and slots, the park, and a client's graph in the frame's submit.
+
+Nothing changes for callers of 0.2: the presenter is new.
+
 ## 0.2.0
 
 The GPU layer: TinyEngine's RHI, render graph and Vulkan device, as
