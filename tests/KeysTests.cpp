@@ -3,6 +3,8 @@
 
 #include "hearth/platform/Keys.h"
 
+// GLFW's codes only: no OpenGL header (GLFW includes one by default).
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
 #include "hamr/test.h"
