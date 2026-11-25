@@ -3,6 +3,7 @@
 #include "hearth/rhi/vulkan/VulkanCommon.h"
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace hearth::rhi {
@@ -20,6 +21,9 @@ namespace hearth::rhi {
 	public:
 		// Zero-filled (a texture filled later through SetData).
 		VulkanImage2D(VulkanRhiDevice& rhiDevice, uint32_t width, uint32_t height, bool srgb = false);
+		// From its RGBA8 pixels (width * height * 4 bytes), the mip chain
+		// built from them.
+		VulkanImage2D(VulkanRhiDevice& rhiDevice, uint32_t width, uint32_t height, std::span<const uint8_t> rgba8, bool srgb = false);
 
 		// A graph-transient RENDER TARGET - the image is created with the
 		// requested format + colour/depth-attachment usage (+ SAMPLED, so

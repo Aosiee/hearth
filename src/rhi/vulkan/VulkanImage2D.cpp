@@ -29,6 +29,16 @@ namespace hearth::rhi {
 		UploadAndGenerateMips(blank.data());
 	}
 
+	VulkanImage2D::VulkanImage2D(VulkanRhiDevice& rhiDevice, uint32_t width, uint32_t height, std::span<const uint8_t> rgba8, bool srgb)
+		: m_RhiDevice(&rhiDevice), m_Srgb(srgb)
+	{
+		HEARTH_ZONE_FUNCTION();
+
+		HEARTH_ASSERT(rgba8.size() == (size_t)width * height * 4, "VulkanImage2D: the pixels are not width * height RGBA8");
+		CreateImage(width, height);
+		UploadAndGenerateMips(rgba8.data());
+	}
+
 	VulkanImage2D::VulkanImage2D(VulkanRhiDevice& rhiDevice, uint32_t width, uint32_t height, const std::vector<std::vector<uint8_t>>& mipLevels, uint32_t firstMipCount)
 		: m_RhiDevice(&rhiDevice)
 	{
