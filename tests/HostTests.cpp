@@ -68,6 +68,19 @@ TEST_CASE("assert: a failed assert reaches the host with its expression and posi
 	CHECK(Calls()[0].File.find("HostTests.cpp") != std::string::npos);
 }
 
+TEST_CASE("assert: a std::string message, built only when the assert fails")
+{
+	hearth::test::Reset();
+	int built = 0;
+	auto message = [&](const char* what) { ++built; return std::string("built: ") + what; };
+	HEARTH_ASSERT(true, message("passing"));
+	CHECK(built == 0);
+	HEARTH_ASSERT(false, message("failing"));
+	CHECK(built == 1);
+	REQUIRE(Calls().size() == 1);
+	CHECK(Calls()[0].Text == "built: failing");
+}
+
 TEST_CASE("assert: a passing assert calls nothing, and its condition runs once")
 {
 	hearth::test::Reset();
