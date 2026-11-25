@@ -22,7 +22,7 @@ option(HEARTH_NO_ZONES "Compile the profiler zones out" OFF)
 # address | undefined | thread: the sanitizer the library and the suite build with.
 set(HEARTH_SANITIZE "" CACHE STRING "Build with a sanitizer (address, undefined or thread)")
 set(HEARTH_HAMR_DIR "" CACHE PATH "A hamr checkout, for the suite's test library (empty: fetch the pinned commit)")
-set(HEARTH_HAMR_COMMIT 58f44868db9a1b0e4ef22c412ebfd11b20b5a223)
+set(HEARTH_HAMR_COMMIT a4d43e9ffe9c084955d28aab5d77c71ff2c8f597) # hamr 0.1.0 (v0.1.0)
 
 set(HEARTH_SANITIZE_FLAGS "")
 if(HEARTH_SANITIZE)

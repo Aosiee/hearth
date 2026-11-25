@@ -3,8 +3,7 @@
 # undefined-behaviour and thread sanitizers.
 #
 # hamr (the suite's test library) is checked out at the commit
-# CMakeLists.txt pins: with the HAMR_TOKEN secret while hamr is private,
-# without one once it is public.
+# CMakeLists.txt pins.
 name: Linux
 
 on:
@@ -46,7 +45,6 @@ jobs:
           repository: Aosiee/hamr
           ref: ${{ steps.pins.outputs.hamr }}
           path: external/hamr
-          token: ${{ secrets.HAMR_TOKEN || github.token }}
 
       # The sanitizers' shadow memory does not fit beside the runner's
       # default address randomisation.
