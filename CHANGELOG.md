@@ -4,6 +4,14 @@ Each release is an annotated tag (`v0.x.0`, or `v0.x.y` for a release of
 fixes only) whose message is the entry below. Versions before 1.0 may change
 the API; every entry says what callers need to change.
 
+## 0.1.1
+
+- GLFW is fetched at the fork's reworded commit (`21b45cdf`, the same
+  tree): the fork's history was rewritten, and 0.1.0's commit can no
+  longer be fetched, so 0.1.0 does not build from source.
+
+Nothing changes for callers.
+
 ## 0.1.0
 
 The first release: the base TinyEngine and Wisp stand on, as a library of
