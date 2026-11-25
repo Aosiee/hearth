@@ -6,16 +6,15 @@
 namespace hearth::rhi {
 
 	// Thin RAII wrapper around a VkBuffer and its VMA managed device memory.
-	// This is a Vulkan implementation detail, engine code never touches it
-	// directly: the RHI's buffer table holds one per BufferHandle (the
-	// engine's VulkanVertexBuffer/VulkanIndexBuffer own such a handle), and a
+	// This is a Vulkan implementation detail, the program never touches it
+	// directly: the RHI's buffer table holds one per BufferHandle, and a
 	// few backend-internal staging/readback buffers use it directly.
 	class VulkanBuffer
 	{
 	public:
 		// hostVisible = true keeps the buffer in host visible, persistently
 		// mapped memory, cheap to write to from the CPU every frame but slower
-		// for the GPU to read (used by Renderer2D's per-frame vertex batch).
+		// for the GPU to read (a per-frame vertex batch, say).
 		// hostVisible = false puts the
 		// buffer in fast device local memory, which has to be written through a
 		// staging buffer (see UploadViaStaging) rather than mapped directly.
@@ -42,8 +41,8 @@ namespace hearth::rhi {
 		// assert reads TRANSFER_DST from it).
 		VkBufferUsageFlags GetUsage() const { return m_Usage; }
 		VmaAllocation GetAllocation() const { return m_Allocation; }
-		// The host-visible staging's persistently-mapped pointer (the
-		// IBL readback's memcpy source).
+		// The host-visible staging's persistently-mapped pointer (a
+		// readback's memcpy source).
 		void* GetMappedData() const { return m_MappedData; }
 
 		// The buffer's slot in the bindless storage-buffer binding (1).

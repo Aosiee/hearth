@@ -1,7 +1,7 @@
 // The descriptor log's recycle step drops only the recycled binding's
-// entries - the texture and buffer arrays share index numbers, and the old
-// texture recycle erased a pending buffer write at the same number (a
-// RenderScene's frame data stayed unwritten).
+// entries - the texture and buffer arrays share index numbers, so a
+// texture recycle that erased every entry at its number would drop a
+// pending buffer write there (the buffer would stay unwritten).
 
 #include "hearth/rhi/vulkan/DescriptorLogUtil.h"
 
@@ -26,7 +26,7 @@ TEST_CASE("rhi descriptor log: a recycle drops only its own binding's entries, i
 	using DescriptorLogUtilTestsDetail::Entry;
 	std::vector<Entry> log = {
 		{ 1, 64, 0 }, // the texture tombstone the recycle supersedes
-		{ 2, 64, 1 }, // a RenderScene's pending frame-data write - must stay
+		{ 2, 64, 1 }, // a pending buffer write at the same number - must stay
 		{ 3, 65, 0 },
 		{ 4, 64, 0 },
 		{ 5, 64, 1 },

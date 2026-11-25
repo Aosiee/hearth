@@ -19,9 +19,9 @@ namespace hearth::rhi {
 
 		CreateSurface(window);
 
-		// F1: the per-swapchain transition pool (created on the game thread
-		// during Init, before the submit thread exists; used only by the
-		// submit thread's depth-transition during a resize).
+		// The per-swapchain transition pool (created on the loop thread
+		// during Init, before any submit thread exists; used only by the
+		// depth transition of a rebuild).
 		CreateTransitionCommandPool();
 
 		int width, height;
@@ -63,7 +63,7 @@ namespace hearth::rhi {
 			return; // idempotent: the destructor runs this after an explicit Shutdown
 
 		VkDevice device = m_Device->GetDevice();
-		// F2: the device-wait touches every queue - scope it under the queue
+		// The device-wait touches every queue - scope it under the queue
 		// mutex (other windows' submit threads may be live; the lock covers
 		// ONLY the wait, never a re-entrant upload).
 		{
@@ -105,14 +105,11 @@ namespace hearth::rhi {
 		// sRGB encode when the fragment shader writes to this attachment, which
 		// is only correct if the shader is actually working in linear colour
 		// (i.e. textures were sampled through an _SRGB format that decoded them
-		// first). VulkanTexture2D samples as plain UNORM (no decode, see its
-		// header), so the shader is really just passing already-sRGB-encoded
+		// first). A VulkanImage2D samples as plain UNORM by default (no
+		// decode), so the shader is really just passing already-sRGB-encoded
 		// bytes through unmodified — writing that through an _SRGB attachment
 		// double-encodes it, which reads as washed out, lower contrast colour.
-		// GL never does any gamma correction anywhere in this renderer (no
-		// GL_FRAMEBUFFER_SRGB, no sRGB texture formats), so matching that
-		// "untouched bytes all the way through" pipeline means the swapchain
-		// shouldn't apply one either.
+		// The swapchain keeps those bytes untouched all the way through.
 		for (const VkSurfaceFormatKHR& format : available)
 		{
 			if (format.format == VK_FORMAT_B8G8R8A8_UNORM && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
@@ -151,10 +148,10 @@ namespace hearth::rhi {
 		return VK_PRESENT_MODE_FIFO_KHR;
 	}
 
-	// The game thread (the r.vsync cvar observer) records the request AND
-	// applies it (from VulkanContext::SwapBuffers, under the submit-idle
-	// park) - the swapchain rebuild must never run on the submit thread
-	// while the game thread owns the RHI handle tables.
+	// The loop thread records the request AND applies it (from the
+	// program's window frame, under the submit-idle park) - the swapchain
+	// rebuild must never run on the submit thread while the loop thread
+	// owns the RHI handle tables.
 	void VulkanSwapchain::SetVsync(bool enabled)
 	{
 		m_PendingVsync.store(enabled ? 1u : 0u, std::memory_order_relaxed);
@@ -201,8 +198,8 @@ namespace hearth::rhi {
 		m_RequestedHeight = height;
 
 		// A zero sized surface means the window is minimized, there's nothing
-		// sensible to build a swapchain against yet. The caller (VulkanContext)
-		// is expected to skip drawing entirely in that case rather than call in
+		// sensible to build a swapchain against yet. The caller (the
+		// program's window frame) is expected to skip drawing entirely in that case rather than call in
 		// here, but bail out safely regardless.
 		if (width == 0 || height == 0)
 			return;
@@ -331,13 +328,12 @@ namespace hearth::rhi {
 		m_DepthGeneration++;
 
 		// One-time UNDEFINED -> DEPTH_ATTACHMENT_OPTIMAL transition, right here
-		// at creation rather than every frame in VulkanContext::RecordClearPass.
+		// at creation rather than every frame in the program's clear pass.
 		// This image is never read anywhere else (no sampling, no present), and
 		// it's cleared in full every frame, so once it's in this layout there's
 		// never a reason to leave it - see VulkanSwapchain.h's GetDepthImageView
-		// comment. F1: this runs on the SUBMIT thread during a resize, so it
-		// uses the swapchain's OWN transient pool, never the device-wide one
-		// the game thread's uploads share.
+		// comment. It uses the swapchain's OWN transient pool, never the
+		// device-wide one the loop thread's uploads share.
 		VkCommandBufferAllocateInfo allocInfo{};
 		allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 		allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -424,7 +420,7 @@ namespace hearth::rhi {
 			m_Device->SetObjectName(VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t)m_ImageViews[i], "Swapchain Image View " + std::to_string(i));
 		}
 
-		// P4-B: adopt each image into the RHI as a barrier-target handle so
+		// Adopt each image into the RHI as a barrier-target handle so
 		// the RenderGraph can Import it (no view/bindless slot - the graph
 		// only barriers it).
 		{
@@ -466,7 +462,7 @@ namespace hearth::rhi {
 		{
 			VK_CHECK(vkCreateSemaphore(m_Device->GetDevice(), &semaphoreCreateInfo, nullptr, &m_ImageAvailableSemaphores[i]));
 			m_Device->SetObjectName(VK_OBJECT_TYPE_SEMAPHORE, (uint64_t)m_ImageAvailableSemaphores[i], "Image Available Semaphore (frame " + std::to_string(i) + ")");
-			// P-A2: no fences - the frame slot's first acquire waits on
+			// No fences - the frame slot's first acquire waits on
 			// timeline value 0 (an immediate no-op).
 			m_FrameLastValues[i].store(0);
 		}
@@ -488,10 +484,10 @@ namespace hearth::rhi {
 		m_ImageViews.clear();
 		m_Images.clear();
 
-		// P4-B: release the adopted image handles (nothing is destroyed -
-		// the images themselves die with the swapchain above). Requires the
-		// RHI device to still be alive - the window (and this swapchain)
-		// dies before Engine::Shutdown tears the device down.
+		// Release the adopted image handles (nothing is destroyed - the
+		// images themselves die with the swapchain above). Requires the RHI
+		// device to still be alive - the program must destroy the window
+		// (and this swapchain) before it shuts the device down.
 		{
 			rhi::Device& rhiDevice = *m_RhiDevice;
 			for (rhi::TextureHandle handle : m_ImageHandles)
@@ -533,9 +529,8 @@ namespace hearth::rhi {
 		}
 	}
 
-	// T-F-C: the out-of-date rebuild sizes from the surface capabilities
-	// (the submit thread owns the surface - no GLFW calls off the main
-	// thread), falling back to the game-thread-published framebuffer size
+	// The out-of-date rebuild sizes from the surface capabilities (no GLFW
+	// call), falling back to the loop thread's published framebuffer size
 	// when the compositor reports an undefined currentExtent.
 	void VulkanSwapchain::RecreateFromSurfaceCapabilities()
 	{
@@ -555,7 +550,7 @@ namespace hearth::rhi {
 		if (width == 0 || height == 0)
 			return;
 
-		// T-F-C: the queue is externally synchronized - the lock guards
+		// The queue is externally synchronized - the lock guards
 		// only the device-wait itself: the rebuild below runs uploads
 		// (CreateDepthResources' one-time transition) that take the same
 		// mutex per-op, so holding it across the rebuild would self-deadlock.
@@ -575,15 +570,15 @@ namespace hearth::rhi {
 
 		VkDevice device = m_Device->GetDevice();
 
-		// P-A2: the frame slot's previous submission must have completed
-		// before its command pool/buffer is reused (the timeline replaces
-		// the old per-frame fence).
+		// The frame slot's previous submission must have completed before
+		// its command pool/buffer is reused (a timeline wait, no per-frame
+		// fence).
 		{
 			HEARTH_ZONE("Acquire: frame-slot timeline wait");
 			m_Device->WaitForTimelineValue(m_FrameLastValues[frameIndex].load());
 		}
 
-		// T-F-C: bounded wait - the acquire runs on the dedicated submit
+		// Bounded wait - the acquire runs on the dedicated submit
 		// thread and must not wedge the shutdown join; the timeout lets a
 		// shutdown request break the loop.
 		VkResult result = VK_TIMEOUT;
@@ -599,8 +594,8 @@ namespace hearth::rhi {
 
 		if (result == VK_ERROR_OUT_OF_DATE_KHR)
 		{
-			// Raise the rebuild request - the game thread performs the
-			// rebuild (under the park) at its next SwapBuffers.
+			// Raise the rebuild request - the loop thread performs the
+			// rebuild (under the park) in the program's next window frame.
 			RequestRebuild();
 			return AcquireResult::OutOfDate;
 		}
@@ -665,10 +660,10 @@ namespace hearth::rhi {
 		VkSemaphore bothSignals[] = { signalSemaphores[0], timelineSemaphore };
 		submitInfo.pSignalSemaphores = bothSignals;
 
-		// T-F-C: the queue is externally synchronized - the frame submit
-		// and the game thread's upload submits serialize on it. The timeline
+		// The queue is externally synchronized - the frame submit and the
+		// loop thread's upload submits serialize on it. The timeline
 		// VALUE is allocated INSIDE the same lock as the submit: with
-		// multiple windows (or the asset upload batch) allocating values
+		// multiple windows (or the upload batch) allocating values
 		// concurrently, an out-of-order execution of two submissions would
 		// otherwise signal a value <= the current one
 		// (VUID-VkSubmitInfo-pSignalSemaphores-03242).
@@ -679,9 +674,10 @@ namespace hearth::rhi {
 			VK_CHECK(vkQueueSubmit(m_Device->GetGraphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
 		}
 
-		// P-A3 note: the retire drain now runs on the game thread after the
-		// frame-complete wait (VulkanContext:: SwapBuffers) - the retire
-		// queue + the VMA allocator never cross threads.
+		// No retire drain here: the loop thread drains the retire queue
+		// (VulkanRhiDevice::DrainRetireQueue, from the program's window
+		// frame), so the retire queue and the VMA allocator never cross
+		// threads.
 		m_ImagesInFlight[imageIndex] = timelineValue;
 		m_FrameLastValues[frameIndex].store(timelineValue);
 

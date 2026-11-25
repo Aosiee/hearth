@@ -79,8 +79,8 @@ namespace hearth::rhi {
 		Compute,
 	};
 
-	// The depth compare operations a pipeline can declare (P-C added this
-	// when the Renderer3D family ported; extended on demand).
+	// The depth compare operations a pipeline can declare (extended on
+	// demand).
 	enum class CompareOp : uint8_t
 	{
 		Never,

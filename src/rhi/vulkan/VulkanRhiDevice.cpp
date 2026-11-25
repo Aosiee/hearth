@@ -92,10 +92,10 @@ namespace hearth::rhi {
 			{
 			case TextureState::Undefined:    return VK_IMAGE_LAYOUT_UNDEFINED;
 			case TextureState::RenderTarget: return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			// The engine's depth images are D32 depth-only (no stencil
-			// aspect anywhere), so the depth-only layouts are the ones every
-			// scope + tracker uses - P4-C caught the depth-view barriers
-			// deriving the STENCIL variants and mismatching.
+			// The RHI's depth images are D32 depth-only (no stencil aspect
+			// anywhere), so the depth-only layouts are the ones every scope
+			// + tracker uses - deriving the STENCIL variants for a depth
+			// view's barriers mismatches the tracked layout.
 			case TextureState::DepthWrite:   return VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
 			case TextureState::DepthRead:    return VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
 			case TextureState::ShaderRead:   return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -108,15 +108,14 @@ namespace hearth::rhi {
 			return VK_IMAGE_LAYOUT_UNDEFINED;
 		}
 
-		// P-A2: the one place states map to (stage, access) pairs. The masks
+		// The one place states map to (stage, access) pairs. The masks
 		// cover the access the state implies; every barrier is emitted via
 		// synchronization2 (VkDependencyInfo), never vkCmdPipelineBarrier.
 		VkPipelineStageFlags2 ToVkStageMask(TextureState state)
 		{
 			switch (state)
 			{
-			// TOP_OF_PIPE (not NONE) is the tree's proven first-use source
-			// stage; an empty stage here would give a barrier with an empty
+			// TOP_OF_PIPE (not NONE) is the first-use source stage; an empty stage here would give a barrier with an empty
 			// first synchronization scope.
 			case TextureState::Undefined:    return VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
 			case TextureState::RenderTarget: return VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -216,8 +215,7 @@ namespace hearth::rhi {
 
 	// ---- VulkanSampler ----------------------------------------------------------
 	// The standalone sampler (a VulkanImage2D bakes its own
-	// internally; this is the RHI's general form, consumed by the fixed
-	// sampler table in P-A3).
+	// internally; this is the RHI's general form, behind CreateSampler).
 
 	void VulkanSampler::Init(VulkanDevice& device, const SamplerDesc& desc, const std::string& debugName)
 	{
@@ -254,7 +252,7 @@ namespace hearth::rhi {
 	// ---- VulkanCommandList ------------------------------------------------------
 	// Wraps one VkCommandBuffer and resolves every handle through the owning
 	// device. Command buffers come from the device's (frame, thread)-keyed pools;
-	// the list carries the frame slot of the pool (it replaced the old thread-local
+	// the list carries the frame slot of the pool (there is no thread-local
 	// record index).
 
 	VulkanCommandList::VulkanCommandList(VulkanRhiDevice* device, VkCommandBuffer commandBuffer, uint32_t frameSlot)
@@ -334,7 +332,7 @@ namespace hearth::rhi {
 
 	void VulkanCommandList::Barrier(std::span<const BarrierDesc> barriers)
 	{
-		// P-A2: synchronization2 only - every barrier becomes a
+		// Synchronization2 only - every barrier becomes a
 		// VkImageMemoryBarrier2/VkBufferMemoryBarrier2 inside one
 		// VkDependencyInfo. State-to-(stage, access, layout) lives solely
 		// in the anonymous-namespace tables above.
@@ -511,10 +509,9 @@ namespace hearth::rhi {
 	void VulkanCommandList::WriteTimestamp(uint32_t queryIndex)
 	{
 		// The device's timestamp pools are frame-indexed; the list's own
-		// slot is the pool its frame reads back. The old form always wrote
-		// frame 0's pool, so a non-zero slot's labels would land in a pool
-		// no one reads. Every list carries a slot, so the old "outside a
-		// record job, fall back to pool 0" branch is gone.
+		// slot is the pool its frame reads back (always writing frame 0's
+		// pool would land a non-zero slot's labels in a pool no one reads).
+		// Every list carries a slot, so there is no fallback pool.
 		vkCmdWriteTimestamp(m_CommandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
 			m_Device->GetVulkan()->GetTimestampPool(FrameSlot()), queryIndex);
 	}
@@ -527,9 +524,8 @@ namespace hearth::rhi {
 
 	VulkanRhiDevice::~VulkanRhiDevice()
 	{
-		// The subsystem idles + destroys the device before this object dies;
-		// the handle tables are cleared defensively here (P-A1 synchronous
-		// destroy makes them empty already).
+		// The program idles + destroys the device (ShutdownDevice) before
+		// this object dies; the handle tables are cleared defensively here.
 		m_Swapchains.Clear();
 		m_CommandLists.Clear();
 		m_Pipelines.Clear();
@@ -622,11 +618,11 @@ namespace hearth::rhi {
 			HEARTH_LOG_WARN(::hearth::LogVulkan, "Pipeline cache: could not write {0}, the next launch is a cold start.", m_PipelineCachePath);
 	}
 
-	// The two fixed samplers Wisp picks from. Baked with Wisp's EXACT
-	// parameters - single-level filtering: the nearest sampler serves the
-	// font atlas, the linear one the image widgets; both CLAMP and clamp
-	// maxLod to 0 so a (conceptually) single-level image can never pick a
-	// downsampled level.
+	// The two fixed samplers a single-level texture picks from, for
+	// single-level filtering (what a UI renderer expects: nearest for a
+	// font atlas, linear for images); both CLAMP and clamp maxLod to 0 so
+	// a (conceptually) single-level image can never pick a downsampled
+	// level.
 	void VulkanRhiDevice::CreateFixedSamplers()
 	{
 		{
@@ -661,7 +657,7 @@ namespace hearth::rhi {
 		}
 	}
 
-	// P-F: the 1x1 white texture every tombstone write points a freed slot
+	// The 1x1 white texture every tombstone write points a freed slot
 	// at. Always a REAL descriptor (no null-handle write): a slot whose
 	// view was destroyed can never be named again, and any code that
 	// samples a freed index gets a harmless white texel instead of
@@ -879,7 +875,7 @@ namespace hearth::rhi {
 		m_Initialized = false;
 	}
 
-	// ---- P-A3: the global bindless set + the retire queue -----------------------
+	// ---- The global bindless set + the retire queue ----------------------------
 
 	void VulkanRhiDevice::CreateGlobalBindlessSet()
 	{
@@ -946,7 +942,7 @@ namespace hearth::rhi {
 		VkDescriptorPoolCreateInfo poolInfo{};
 		poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
-		// P-F: one set per frame slot (TotalFrameSlots identical sets; a
+		// One set per frame slot (TotalFrameSlots identical sets; a
 		// slot's set is only written when that slot begins recording).
 		poolInfo.maxSets = VulkanDevice::TotalFrameSlots;
 		poolInfo.poolSizeCount = 2;
@@ -1012,7 +1008,7 @@ namespace hearth::rhi {
 
 	void VulkanRhiDevice::WriteTextureDescriptor(uint32_t index, VkImageView imageView, VkSampler sampler, VkImageLayout layout)
 	{
-		// P-F: appends to the versioned write log; the write lands on a
+		// Appends to the versioned write log; the write lands on a
 		// slot's set when that slot begins recording (ApplyDescriptorLog)
 		// - which, by the timeline, is after the slot's previous submission
 		// has retired, so a rewrite of a live index is always legal.
@@ -1090,8 +1086,8 @@ namespace hearth::rhi {
 		// Collect the entries this slot hasn't applied yet (they are
 		// already in log order, seq ascending - the apply lower_bounds
 		// the monotonic seq instead of walking the whole log from 0).
-		// The scratch buffers are reused across applies (the old form
-		// allocated three log-sized vectors per slot per frame).
+		// The scratch buffers are reused across applies (no log-sized
+		// allocation per slot per frame).
 		std::vector<VkWriteDescriptorSet>& writes = m_ApplyScratchWrites;
 		std::vector<VkDescriptorImageInfo>& imageInfos = m_ApplyScratchImageInfos;
 		std::vector<VkDescriptorBufferInfo>& bufferInfos = m_ApplyScratchBufferInfos;
@@ -1289,7 +1285,7 @@ namespace hearth::rhi {
 		// slot) - it must never enter the free list or get a tombstone.
 		entry.HasBindlessIndex = bindlessIndex < kBindlessTextures;
 
-		// P-F: the tombstone re-points the slot at the null texture (a REAL
+		// The tombstone re-points the slot at the null texture (a REAL
 		// descriptor - nulling the slot needs the nullDescriptor feature,
 		// which even enabled faults the current NVIDIA driver). The index
 		// is recycled only after every slot applied it.
@@ -1373,20 +1369,17 @@ namespace hearth::rhi {
 		// referencing the object are freed at the slot's reset TWO
 		// record-starts later, and that reset's acquire-fence wait covers
 		// the frame's submission completion). No timeline prediction: an
-		// interleaved upload batch or another window's submit can no longer
-		// consume the stamp (the old last-submitted+1 form freed one
-		// submission early). The secondary windows' extracts bucket into the
-		// MAIN window's slot (their resources are the swapchain's own, whose
-		// teardown parks the device anyway) - the documented approximation.
-		// The retire queue is game-thread-owned - asserted here, in both
-		// drains and in the size accessor. A GPU object's last Ref dropped
-		// on any other thread is a defect, not a case to bucket: a caller
-		// census counted 0 non-game callers in 18400 retires (the captures,
-		// the 600-frame and two-window runs, forced swapchain rebuilds, the
-		// load/evict churn). The swapchain rebuild runs on the game thread
-		// under the submit-idle park; asset workers only parse; recording
-		// never creates or destroys device objects.
-		// The slot tag is the game thread's current slot, read from the main
+		// interleaved upload batch or another window's submit cannot
+		// consume the stamp (a last-submitted+1 stamp frees one submission
+		// early). The secondary windows' retires bucket into the MAIN
+		// window's slot (their resources are the swapchain's own, whose
+		// teardown parks the device anyway) - a deliberate approximation.
+		// The retire queue is loop-thread-owned - asserted here, in both
+		// drains and in the size accessor. A GPU object released on any
+		// other thread is the caller's defect, not a case to bucket: the
+		// swapchain rebuild runs on the loop thread under the submit-idle
+		// park, and recording never creates or destroys device objects.
+		// The slot tag is the loop thread's current slot, read from the main
 		// context. The one named exception is NO main context: before the
 		// first window's Init, and after the main window's teardown cleared
 		// it (the shutdown-time destroys). Those entries tag slot 0, and the
@@ -1450,12 +1443,12 @@ namespace hearth::rhi {
 
 	void VulkanRhiDevice::FreeRetireEntryObjects(const RetireEntry& entry)
 	{
-		// P-F: the destruction of a texture's Vk view and the purge of its
+		// The destruction of a texture's Vk view and the purge of its
 		// REAL log entries must be atomic w.r.t. ApplyDescriptorLog - a
 		// record worker mid-apply holds this mutex, so destroying the view
 		// only here (under the same lock) guarantees no apply can ever
 		// touch a freed VkImageView, and no worker that already copied the
-		// write can race the free (DrainRetireQueue runs on the game
+		// write can race the free (DrainRetireQueue runs on the loop
 		// thread, the apply on record workers).
 		std::lock_guard lock(m_DescriptorLogMutex);
 
@@ -1490,7 +1483,7 @@ namespace hearth::rhi {
 		}
 		if (entry.HasBindlessIndex)
 		{
-			// P-F: the index returns to the free list only when its
+			// The index returns to the free list only when its
 			// tombstone has been applied to EVERY slot's set (until then
 			// some slot's set still names the destroyed view).
 			// Every REAL write for this index is now dead weight that must
@@ -1689,10 +1682,10 @@ namespace hearth::rhi {
 		}
 		else if (desc.MipLevels == 1)
 		{
-			// P-D: a genuinely single-level texture (the baked-mip ctor
+			// A genuinely single-level texture (the baked-mip ctor
 			// uploads each level directly - no blit chain). The fixed
-			// sampler's maxLod-0 clamp + one level is what reproduces
-			// Wisp's single-level filtering exactly.
+			// sampler's maxLod-0 clamp + one level gives exact
+			// single-level filtering.
 			std::vector<std::vector<uint8_t>> levels;
 			if (initialData && dataSize > 0)
 				levels.push_back(std::vector<uint8_t>((const uint8_t*)initialData, (const uint8_t*)initialData + dataSize));
@@ -1875,7 +1868,7 @@ namespace hearth::rhi {
 				if (!slot.Alive || !slot.Object || slot.Object->GetName() != name)
 					continue;
 				result.Matched++;
-				if (slot.Object->GetSpirV() != code) // the daemon re-broadcasts every asset per build
+				if (slot.Object->GetSpirV() != code) // a reload source may resend unchanged SPIR-V
 					changed.push_back(slot.Object.get());
 			}
 		}
@@ -2075,7 +2068,7 @@ namespace hearth::rhi {
 		spec.DepthAttachmentFormat = ToVkFormat(desc.DepthAttachmentFormat);
 		spec.PushConstantSize = desc.PushConstantSize;
 		spec.PushConstantStages = desc.PushConstantStages;
-		// P-A3: every RHI pipeline shares the global bindless set (set 0);
+		// Every RHI pipeline shares the global bindless set (set 0);
 		// the layout is baked in implicitly - no PipelineStateDesc field.
 		spec.DescriptorSetLayout = m_GlobalSetLayout;
 		return FindOrCreateCachedPipeline(key, spec, debugName);
@@ -2190,7 +2183,7 @@ namespace hearth::rhi {
 	CommandListHandle VulkanRhiDevice::CreateCommandList(QueueHandle queue, uint32_t threadIndex)
 	{
 		HEARTH_ASSERT(m_Initialized, "RHI command list created before the device");
-		HEARTH_ASSERT(threadIndex == 0, "P-A1 records on the main thread only (thread pools land in P-A2)");
+		HEARTH_ASSERT(threadIndex == 0, "command lists created through the Device interface record on thread 0");
 		(void)queue;
 
 		VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
@@ -2223,7 +2216,7 @@ namespace hearth::rhi {
 
 	QueueHandle VulkanRhiDevice::GetQueue(QueueKind kind)
 	{
-		// v1: all three kinds resolve to the single graphics queue.
+		// All three kinds resolve to the single graphics queue.
 		(void)kind;
 		return m_GraphicsQueue;
 	}
@@ -2231,9 +2224,9 @@ namespace hearth::rhi {
 	uint64_t VulkanRhiDevice::Submit(QueueHandle queue, std::span<const CommandListHandle> commandLists,
 		std::span<const TimelineWait> waits, std::span<const TimelineSignal> signals)
 	{
-		// P-A2: a real timeline submit. v1: all queues resolve to the one
-		// graphics queue; its timeline is the only semaphore waits/signals
-		// name, so multiple entries collapse to the single largest value.
+		// A timeline submit. All queues resolve to the one graphics queue;
+		// its timeline is the only semaphore waits/signals name, so
+		// multiple entries collapse to the single largest value.
 		// Every submit signals one fresh value (allocated here when the
 		// caller passes none) and returns it.
 		(void)queue;
@@ -2280,7 +2273,7 @@ namespace hearth::rhi {
 
 		// The value allocation + the vkQueueSubmit share one critical
 		// section on the queue mutex: concurrent allocators (two windows'
-		// frame submits, the asset upload batch) must execute in allocation
+		// frame submits, the upload batch) must execute in allocation
 		// order (VUID-VkSubmitInfo-pSignalSemaphores-03242).
 		{
 			std::lock_guard queueLock(m_Vulkan.GetQueueMutex());
@@ -2304,7 +2297,7 @@ namespace hearth::rhi {
 	{
 		if (m_Initialized)
 		{
-			// F2: scope the device-wait under the queue mutex (live submit
+			// Scope the device-wait under the queue mutex (live submit
 			// threads on the same queue - the wait covers ONLY this).
 			std::lock_guard queueLock(m_Vulkan.GetQueueMutex());
 			vkDeviceWaitIdle(m_Vulkan.GetDevice());
@@ -2313,10 +2306,10 @@ namespace hearth::rhi {
 
 	SwapchainHandle VulkanRhiDevice::CreateSwapchain(void* window)
 	{
-		// P-A2: wraps the per-window swapchain (now timeline-paced - the
-		// per-frame fences are gone). VulkanWindowContext still drives the frame
+		// Wraps a per-window swapchain (timeline-paced, no per-frame
+		// fences). The program's window frame may instead drive its frame
 		// loop through its own VulkanSwapchain instance; this is the RHI's
-		// owner API for per-window state (P-D's WispWindowRenderState).
+		// handle-owned form of per-window swapchain state.
 		EnsureDevice((hearth::platform::Window*)window);
 		SwapchainHandle handle = m_Swapchains.Acquire();
 		m_Swapchains.Publish(handle, std::make_unique<VulkanSwapchain>());
@@ -2336,7 +2329,7 @@ namespace hearth::rhi {
 	VkBuffer VulkanRhiDevice::GetBufferHandle(BufferHandle handle) const
 	{
 		// The field read happens under the table's shared lock: the wrapper
-		// may be freed by a concurrent game-thread Release the instant the
+		// may be freed by a concurrent loop-thread Release the instant the
 		// lock drops (the record workers read these during record).
 		// A Retiring slot still resolves (the record of a frame that drew it
 		// may run after its owner died).
@@ -2350,7 +2343,7 @@ namespace hearth::rhi {
 	{
 		// Wrapped entries carry no owned image (the caller owns it) - but the
 		// adopted image is recorded so barrier targets resolve through the
-		// same handle (P4-B). Read under the table's shared lock.
+		// same handle. Read under the table's shared lock.
 		std::shared_lock lock(m_Textures.Mutex);
 		if (const VulkanTextureEntry* entry = m_Textures.GetNoLock(handle))
 		{

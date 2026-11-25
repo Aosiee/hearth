@@ -15,17 +15,14 @@ namespace hearth::rhi {
 
 	// Everything Vulkan needs baked into a pipeline object up front: shader
 	// stages, vertex layout, and fixed function state (blend/depth/raster).
-	// State that was runtime toggles in OpenGL (glEnable(GL_BLEND) etc, see
-	// The pipeline description) has to be known at pipeline creation time here
-	// instead.
+	// State that was runtime toggles in OpenGL (glEnable(GL_BLEND) etc) has
+	// to be known at pipeline creation time here instead.
 	//
-	// Depth support (DepthTestEnable/DepthWriteEnable/DepthCompareOp/
-	// DepthAttachmentFormat below) exists for Renderer3D's depth-tested
-	// geometry - Renderer2D's own pipeline still leaves depth test/write
-	// off, but does declare a matching DepthAttachmentFormat, since it
-	// shares a render target with Renderer3D's depth-tested geometry (see
-	// VulkanCommon.h's kSharedDepthFormat for why that has to match
-	// exactly).
+	// Depth support: DepthTestEnable/DepthWriteEnable/DepthCompareOp/
+	// DepthAttachmentFormat below. A pipeline that leaves depth test/write
+	// off but draws into a target with depth-tested geometry must still
+	// declare the matching DepthAttachmentFormat (see VulkanCommon.h's
+	// kSharedDepthFormat for why that has to match exactly).
 	struct VulkanPipelineSpec
 	{
 		VulkanShaderModule* VertexShader = nullptr;
@@ -40,8 +37,8 @@ namespace hearth::rhi {
 		VkDescriptorSetLayout DescriptorSetLayout = VK_NULL_HANDLE;
 
 		// The pipeline's single push-constant range. Vertex stage only by
-		// default (a single MVP matrix), see VulkanPipeline.cpp. P4's overlay
-		// discard mode needs the FRAGMENT stage to read a value too: GLSL
+		// default (a single MVP matrix), see VulkanPipeline.cpp. A fragment
+		// stage that reads a value too (a discard mode, say) shares it: GLSL
 		// push-constant blocks always begin at offset 0 per stage, so the two
 		// stages' blocks would overlap in the push-constant buffer. The clean
 		// resolution is ONE range whose size covers the shared block

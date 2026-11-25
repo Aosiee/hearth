@@ -31,13 +31,11 @@ namespace hearth::rhi {
 	};
 
 
-	// Everything the in-editor "GPU Frame Debugger" panel shows. Plain
-	// data, no Vulkan types, so
-	// EditorLayer.cpp can read and render it without a single Platform/Vulkan
-	// include — the same "cross-backend query, backend-specific population"
-	// shape already used for the UI texture handle. Only ever populated once the
-	// renderer has actually completed a frame; a snapshot (RhiDevice::GetGpuFrameDebugSnapshot) comes
-	// back with Available = false before then.
+	// Everything a frame debugger shows. Plain data, no Vulkan types, so
+	// the program can read and render it without a single Vulkan include
+	// (a cross-backend query, populated by the backend). Only ever
+	// populated once the renderer has actually completed a frame; a
+	// snapshot taken before then comes back with Available = false.
 
 	struct GpuPassTiming
 	{
@@ -89,15 +87,13 @@ namespace hearth::rhi {
 
 	// The frame debug info is written by the submit thread (and the
 	// validation-messenger callback on whichever thread triggered a call)
-	// and read by the editor's game thread - writers hold the sink's lock,
-	// the reader takes a snapshot.
+	// and read by the program's frame debugger on the loop thread -
+	// writers hold the sink's lock, the reader takes a snapshot.
 	//
-	// The sink is a member of the RhiDevice subsystem (formerly a file-scope
-	// struct + mutex, a process global). The messenger reaches it through
-	// its pUserData, the submit thread and the record passes through their
-	// VulkanDevice, the editor through RhiDevice::GetGpuFrameDebugSnapshot.
-	// The subsystem owns the backend device, so the sink outlives every
-	// writer.
+	// The program owns the sink (VulkanDevice::SetGpuFrameDebugSink) and
+	// must keep it alive longer than the device. The messenger reaches it
+	// through its pUserData, the submit thread and the record passes
+	// through their VulkanDevice, the program through Snapshot.
 	//
 	// The type and every population site are compiled out without
 	// HEARTH_GPU_DEBUG (a release program has no frame debugger).
@@ -105,7 +101,7 @@ namespace hearth::rhi {
 	class GpuFrameDebugSink
 	{
 	public:
-		// The editor's read: a copy taken under the lock.
+		// The reader's copy, taken under the lock.
 		GpuFrameDebugInfo Snapshot() const
 		{
 			std::lock_guard lock(m_Mutex);

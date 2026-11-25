@@ -7,7 +7,7 @@
 #include <vector>
 
 // The on-disk container around the driver's pipeline cache blob. Pure
-// bytes + file IO (no driver calls) so the rules run in tinytest: a blob
+// bytes + file IO (no driver calls) so the rules run in the suite: a blob
 // is handed to the driver only when it is whole (NVIDIA answers a damaged
 // body with VK_ERROR_UNKNOWN instead of ignoring it, and silently accepts
 // flipped body bytes), and a save can never be observed half-written by
@@ -27,7 +27,7 @@ namespace hearth::rhi {
 	{
 		Ok = 0,
 		TooSmall,         // shorter than the container header
-		BadMagic,         // not this container (includes the old UUID-prefixed format)
+		BadMagic,         // not this container (includes an earlier UUID-prefixed format)
 		BadVersion,       // a container revision this build cannot read
 		IdentityMismatch, // another GPU/driver/display mode wrote it - expected, not damage
 		SizeMismatch,     // the recorded payload size disagrees with the file

@@ -1,9 +1,8 @@
 #pragma once
 
-// The RHI umbrella. `te::rhi` (the `te` alias already exists). The API
-// surface is backend-neutral; the Vulkan implementation lives under
-// Platform/Vulkan/RHI/ so the exit criterion "no backend identifiers
-// outside Platform/Vulkan/" stays literally true.
+// The RHI umbrella. The API surface is backend-neutral; the Vulkan
+// implementation lives under hearth/rhi/vulkan, so no backend identifier
+// appears outside it.
 
 #include "hearth/rhi/Types.h"
 #include "hearth/rhi/States.h"

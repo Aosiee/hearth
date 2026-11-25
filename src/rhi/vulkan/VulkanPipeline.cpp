@@ -8,8 +8,8 @@ namespace hearth::rhi {
 		m_Device = &device;
 
 		// A single push-constant range. Stage flags default to VERTEX_BIT;
-		// P4's overlay pipelines set them to VERTEX_BIT | FRAGMENT_BIT so the
-		// fragment stage can read a discard-mode value at an offset past the
+		// a pipeline may set VERTEX_BIT | FRAGMENT_BIT so the fragment stage
+		// can read a value (a discard mode, say) at an offset past the
 		// vertex mat4 (see VulkanPipeline.h). One range (never two) avoids the
 		// overlapping-range push VUID (VUID-vkCmdPushConstants-offset-01796)
 		// that two per-stage ranges sharing byte 0 would trigger.

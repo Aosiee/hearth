@@ -12,8 +12,8 @@ namespace hearth::rhi {
 		// single textured quad.
 		void InitSingleCombinedImageSampler(VulkanDevice& device, VkShaderStageFlags stageFlags, const std::string& debugName);
 
-		// The bindless-ish texture array Renderer2D's quad batch indexes by
-		// a per-vertex TexIndex. This is
+		// A bindless-ish texture array a quad batch indexes by a per-vertex
+		// TexIndex. This is
 		// hand declared policy, not something reflection can infer
 		// (PARTIALLY_BOUND_BIT specifically, so slots beyond whatever a given
 		// batch actually used don't need writing — the shader only ever reads
@@ -56,7 +56,7 @@ namespace hearth::rhi {
 
 	// Points a combined image sampler descriptor at a specific texture. layout
 	// should be whatever VkImageLayout the image is actually in right now
-	// (VulkanTexture2D::GetCurrentLayout), not assumed to always be
+	// (VulkanImage2D::GetCurrentLayout), not assumed to always be
 	// SHADER_READ_ONLY_OPTIMAL.
 	void WriteCombinedImageSamplerDescriptor(VulkanDevice& device, VkDescriptorSet set, uint32_t binding, VkImageView imageView, VkSampler sampler, VkImageLayout layout);
 

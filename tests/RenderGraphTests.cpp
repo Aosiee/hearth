@@ -576,7 +576,7 @@ namespace hearth::rg_tests {
 		// The concurrent record contract - the prepare stage pre-creates the
 		// transients, then RecordPass fans out to loom workers with one mock
 		// list per pass, and the final-state carry runs single-threaded
-		// afterwards. Runs under TSAN in the tinytest dev-tsan config.
+		// afterwards. Meant to run clean under TSAN.
 		loom::Pool loomPool; // an explicit pool (no lazy loom init)
 
 		rg::TransientTexturePool pool;

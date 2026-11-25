@@ -24,7 +24,7 @@ namespace hearth::rhi {
 		R16G16B16A16_SFLOAT,
 		R16G16_SFLOAT,
 
-		// P-A3/P-B: the quad vertex attribute formats (extended on demand).
+		// The vertex attribute formats (extended on demand).
 		R32G32B32_SFLOAT,
 		R32G32B32A32_SFLOAT,
 		R32G32_SFLOAT,

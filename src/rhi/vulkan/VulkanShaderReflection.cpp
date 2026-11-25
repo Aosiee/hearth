@@ -16,7 +16,7 @@ namespace hearth::rhi {
 
 		// Only one push constant block is supported right now (Vulkan itself
 		// only allows one active range per stage combination in practice for
-		// how this engine uses them), so the first one found is it.
+		// how the RHI uses them), so the first one found is it.
 		for (const spirv_cross::Resource& pushConstant : resources.push_constant_buffers)
 		{
 			const spirv_cross::SPIRType& type = compiler.get_type(pushConstant.base_type_id);

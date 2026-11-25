@@ -1,10 +1,9 @@
 #pragma once
 
-// The Vulkan implementation of the RHI. Wrap-first: every handle wraps the
-// existing Platform/Vulkan classes with no behaviour change. P-A1 ships
-// the device lifecycle, the generation- checked handle tables, and the
-// resource create/destroy surface; the frame-sync (P-A2) and bindless
-// (P-A3) rewrites land on top.
+// The Vulkan implementation of the RHI: every handle wraps one of the
+// Vulkan classes beside this header. It holds the device lifecycle, the
+// generation-checked handle tables, the resource create/destroy surface,
+// the per-slot bindless sets and the retire queue.
 
 #include "hearth/rhi/RHI.h"
 
@@ -28,8 +27,7 @@ namespace hearth::platform { class Window; }
 namespace hearth::rhi {
 
 	// The standalone sampler (a VulkanImage2D bakes its own
-	// internally; this is the RHI's general form, consumed by the fixed
-	// sampler table in P-A3).
+	// internally; this is the RHI's general form, behind CreateSampler).
 	class VulkanSampler
 	{
 	public:
@@ -93,12 +91,12 @@ namespace hearth::rhi {
 		VkPipelineBindPoint m_BoundBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 	};
 
-	// P-D: a wrapped external image (WrapUIImageHandle) - the caller owns the
+	// A wrapped external image (CreateTextureFromNativeImage) - the caller owns the
 	// VkImage; the RHI owns only the view + the bindless slot. Destruction
 	// retires the view + slot (no image, no sampler - the shared fixed
 	// sampler must never enter a retire entry). The image itself is recorded
-	// so barrier targets resolve through the same handle (P4-B: the
-	// swapchain images are adopted this way).
+	// so barrier targets resolve through the same handle (the swapchain
+	// images are adopted this way).
 	class VulkanWrappedTexture
 	{
 	public:
@@ -138,8 +136,8 @@ namespace hearth::rhi {
 		~VulkanRhiDevice() override;
 
 		// The device lifecycle: lazy on first window (the window is needed
-		// for GLFW's instance-extension query), destroyed by the subsystem
-		// on shutdown.
+		// for GLFW's instance-extension query), destroyed by the program
+		// through ShutdownDevice.
 		void EnsureDevice(hearth::platform::Window* windowForExtensionQuery);
 		// Where the driver pipeline cache persists (empty: it does not): read
 		// when the device is created (loaded) and when it shuts down
@@ -148,8 +146,8 @@ namespace hearth::rhi {
 		void ShutdownDevice();
 		VulkanDevice* GetVulkan() { return &m_Vulkan; }
 
-		// ---- P-A3: the global bindless set + the retire queue ----------
-		// P-F: ONE UPDATE_AFTER_BIND set PER FRAME SLOT (TotalFrameSlots
+		// ---- The global bindless set + the retire queue ---------------
+		// One UPDATE_AFTER_BIND set PER FRAME SLOT (TotalFrameSlots
 		// identical copies - a slot's set is only touched when that slot's
 		// previous submission has retired, so rewrites are legal). Every
 		// descriptor write goes through a monotonic write log and is
@@ -165,14 +163,13 @@ namespace hearth::rhi {
 
 		uint32_t AllocateBindlessTextureIndex();
 		void WriteTextureDescriptor(uint32_t index, VkImageView imageView, VkSampler sampler, VkImageLayout layout);
-		// The buffer side of the bindless set (binding 1, STORAGE_BUFFER) -
-		// the per-frame light/view SSBO and the per-material SSBO are its
-		// first consumers. The same contract as textures: write once
+		// The buffer side of the bindless set (binding 1, STORAGE_BUFFER).
+		// The same contract as textures: write once
 		// through the log, recycle the index only after every slot applied
 		// its tombstone.
 		uint32_t AllocateBindlessBufferIndex();
 		void WriteBufferDescriptor(uint32_t index, VkBuffer buffer);
-		// P-F: applies every logged write with Seq > this slot's last
+		// Applies every logged write with Seq > this slot's last
 		// applied seq to the slot's set in one vkUpdateDescriptorSets batch
 		// (idempotent; called from VulkanCommandList::BindGlobalSet).
 		void ApplyDescriptorLog(uint32_t slot);
@@ -198,9 +195,9 @@ namespace hearth::rhi {
 		void QueueSamplerForDestruction(VkSampler sampler);
 
 		// Frees every entry whose slot's record-start resets reached its tag
-		// (called once per frame by SwapBuffers, after the enqueue, and by the
-		// 2D retire self-test - both on the game thread). Shutdown drains
-		// unconditionally instead. The retire queue is game-thread-owned -
+		// (called once per frame by the program's window frame, after the
+		// enqueue, on the loop thread). Shutdown drains unconditionally
+		// instead. The retire queue is loop-thread-owned -
 		// QueueRetire (the choke point every Queue*ForDestruction / Destroy* /
 		// GPU-object destructor reaches) and both drains assert
 		// VulkanDevice::IsGameThread(). Only NoteSlotReset crosses threads,
@@ -209,21 +206,21 @@ namespace hearth::rhi {
 		void DrainRetireQueueUnconditional();
 
 		// Dev/test accessor: true while the index is handed out and not yet
-		// recycled by a drain (the self-test's assertions). An index
+		// recycled by a drain (for the tests' assertions). An index
 		// awaiting its tombstone's application is NOT live.
 		bool IsBindlessIndexLive(uint32_t index) const;
 
 		// Dev/test accessor: true once the index is back in the free list
 		// - i.e. the timeline passed AND every slot applied its tombstone
-		// (what the self-test asserts).
+		// (what a retire test asserts).
 		bool IsBindlessIndexRecycled(uint32_t index) const;
 
-		// Dev/test accessor: the retire queue's current depth (the S-C
-		// buffer-retire self-test asserts the mesh destruction path queues
-		// instead of destroying synchronously).
+		// Dev/test accessor: the retire queue's current depth (a test can
+		// assert that a buffer's destruction queues instead of destroying
+		// synchronously).
 		size_t GetRetireQueueSize() const;
 
-		// Dev/test accessors (the self-test's Retiring-slot checks):
+		// Dev/test accessors (for checks of the Retiring slot state):
 		// owner-live = the owner-side lookup resolves (false from
 		// DestroyBuffer on - a second destroy is rejected); recycled = the
 		// table slot was released (generation bumped) and its index is back
@@ -244,15 +241,15 @@ namespace hearth::rhi {
 		// TRANSFER_DST, its staging-upload target).
 		BufferHandle CreateBuffer(const BufferDesc& desc, const char* debugName) override;
 		// Retires the buffer and its table slot together through the retire
-		// queue (game thread, like every QueueRetire). From this call on the
+		// queue (loop thread, like every QueueRetire). From this call on the
 		// handle is dead to its owner (every owner-side lookup fails, a
 		// second destroy asserts), but the record-side resolution
 		// (GetBufferHandle) keeps resolving it until the free - the frame
-		// still recording on the submit thread may name it (a PendingDraw
-		// carries handles, not Refs).
+		// still recording on the submit thread may name it (a recorded draw
+		// carries the handle, not an owning reference).
 		void DestroyBuffer(BufferHandle handle) override;
 		void SetBufferData(BufferHandle handle, const void* data, uint64_t size, uint64_t offset = 0) override;
-		// The capture sidecar's read of a host-visible buffer (null otherwise).
+		// A host-visible buffer's mapped data, for a readback (null otherwise).
 		const void* GetBufferMappedData(BufferHandle handle);
 		// The bindless storage-buffer write (binding 1).
 		void WriteBindlessBuffer(uint32_t index, BufferHandle handle) override;
@@ -322,13 +319,13 @@ namespace hearth::rhi {
 		// slot.
 		void QueueBufferForDestruction(VkBuffer buffer, VmaAllocation allocation, uint32_t bindlessIndex = ~0u, BufferHandle slot = {});
 
-		// P-A3: the global bindless set and the retire
+		// The global bindless set and the retire
 		// queue. The stamp is the value the NEXT submit will signal
 		// - the earliest submission that could reference the object.
 		void CreateGlobalBindlessSet();
 		void DestroyGlobalBindlessSet();
 		void CreateFixedSamplers();
-		// P-F: the 1x1 white null texture every tombstone write points a
+		// The 1x1 white null texture every tombstone write points a
 		// freed slot at (a REAL descriptor - nulling the slot instead
 		// requires the nullDescriptor feature, and even enabled it faults
 		// the current NVIDIA driver).
@@ -340,7 +337,7 @@ namespace hearth::rhi {
 		void CreateNullBuffer();
 		void DestroyNullBuffer();
 
-		// P-F: the descriptor write log. All writes - creation, rewrite,
+		// The descriptor write log. All writes - creation, rewrite,
 		// tombstone - append here; nothing writes a set directly. A slot's
 		// set applies its pending entries at record start
 		// (ApplyDescriptorLog).
@@ -376,9 +373,9 @@ namespace hearth::rhi {
 			Kind        Kind_ = Kind::Texture;
 			// The frame-boundary tag - the entry frees once the SLOT's
 			// record-start resets (the NoteSlotReset bumps) reach the
-			// ResetTag. No timeline prediction (the old last-submitted+1
-			// stamp freed one submission early when an upload batch or
-			// another window's submit interleaved).
+			// ResetTag. No timeline prediction (a last-submitted+1 stamp
+			// frees one submission early when an upload batch or another
+			// window's submit interleaves).
 			uint32_t    Slot = 0;
 			uint64_t    ResetTag = 0;
 			VkImage     Image = VK_NULL_HANDLE;
@@ -395,7 +392,7 @@ namespace hearth::rhi {
 			BufferHandle BufferSlot;
 			uint32_t    BindlessIndex = 0;
 			bool        HasBindlessIndex = false;
-			// P-F: the tombstone log write's seq (0 = none). The index is
+			// The tombstone log write's seq (0 = none). The index is
 			// reusable only once the reset tag passed AND every
 			// slot's set has applied this seq.
 			uint64_t    TombstoneSeq = 0;
@@ -404,24 +401,23 @@ namespace hearth::rhi {
 		void FreeRetireEntry(const RetireEntry& entry);
 		// The Vk objects + the bindless index (under the descriptor log lock).
 		void FreeRetireEntryObjects(const RetireEntry& entry);
-		// The dev assert every retire-queue access goes through (the game
+		// The dev assert every retire-queue access goes through (the loop
 		// thread is its one owner).
 		void AssertRetireQueueOwner(const char* entryPoint) const;
 
 		// The generation-checked handle table: fixed-slot objects + a
-		// freelist; a freed slot bumps its generation. Deferred destruction
-		// (the retire queue) arrives in P-A3 - P-A1 destroys synchronously.
+		// freelist; a freed slot bumps its generation.
 		template <typename THandle, typename TObject>
 		struct Table
 		{
-			// The handle tables are read by the Loom record workers
-			// (GetBufferHandle/GetTextureView during record) while the game
-			// thread's extract mutates them (CreateBuffer/DestroyBuffer +
+			// The handle tables are read by the record workers
+			// (GetBufferHandle/GetTextureView during record) while the loop
+			// thread mutates them (CreateBuffer/DestroyBuffer +
 			// streaming creates and the retire-queue frees) - a plain vector
 			// reallocation torn by a concurrent Get() is a data race that
 			// corrupts the handle and SIGSEGVs in the driver. Readers take
 			// the shared lock (readers don't block readers); writers take the
-			// exclusive lock (they are infrequent, game-thread-only) - the
+			// exclusive lock (they are infrequent, loop-thread-only) - the
 			// same shape as the descriptor write log's mutex.
 			struct Slot
 			{
@@ -604,12 +600,13 @@ namespace hearth::rhi {
 		Table<CommandListHandle, VulkanCommandList> m_CommandLists;
 		Table<SwapchainHandle, VulkanSwapchain> m_Swapchains;
 
-		// P-D: the two fixed samplers Wisp picks from at texture creation
-		// (baked with Wisp's exact parameters - single-level filtering).
+		// The two fixed samplers a single-level texture picks from at
+		// creation (single-level filtering, the parameters a UI renderer
+		// expects).
 		VkSampler m_FixedSamplerLinear = VK_NULL_HANDLE;
 		VkSampler m_FixedSamplerNearest = VK_NULL_HANDLE;
 
-		// P-F: the tombstone target (a real 1x1 white texture) - freed
+		// The tombstone target (a real 1x1 white texture) - freed
 		// slots point here until recycled, so no slot's set ever names a
 		// destroyed view and no null-handle write is needed.
 		VkImage m_NullTextureImage = VK_NULL_HANDLE;
@@ -627,8 +624,8 @@ namespace hearth::rhi {
 		// submission has retired by then).
 		VkDescriptorSet m_GlobalSets[VulkanDevice::TotalFrameSlots] = {};
 
-		// P-F: the write log + per-slot apply bookkeeping. Guarded by
-		// m_DescriptorLogMutex (appends happen on the game thread at
+		// The write log + per-slot apply bookkeeping. Guarded by
+		// m_DescriptorLogMutex (appends happen on the loop thread at
 		// creation/destruction; the apply + bind run on record threads).
 		std::vector<DescriptorWriteLogEntry> m_DescriptorWriteLog;
 		uint64_t m_NextDescriptorSeq = 1;
@@ -658,9 +655,9 @@ namespace hearth::rhi {
 		std::vector<std::pair<uint32_t, uint64_t>> m_PendingIndexReuse; // (index, tombstone seq)
 		mutable std::mutex m_DescriptorLogMutex;
 
-		// The apply-side scratch buffers (reused across applies instead
-		// of the old per-slot-per-frame three vector allocations at
-		// full-log size). Only touched under m_DescriptorLogMutex.
+		// The apply-side scratch buffers (reused across applies, so an
+		// apply allocates nothing at full-log size). Only touched under
+		// m_DescriptorLogMutex.
 		std::vector<VkWriteDescriptorSet> m_ApplyScratchWrites;
 		std::vector<VkDescriptorImageInfo> m_ApplyScratchImageInfos;
 		std::vector<VkDescriptorBufferInfo> m_ApplyScratchBufferInfos;
@@ -675,7 +672,7 @@ namespace hearth::rhi {
 		std::vector<std::pair<uint32_t, uint64_t>> m_PendingBufferIndexReuse;
 		std::vector<uint32_t> m_FreeBindlessBufferIndices;
 		uint32_t m_NextBindlessBufferIndex = 0;
-		// Game-thread-owned, unlocked by design (AssertRetireQueueOwner).
+		// Loop-thread-owned, unlocked by design (AssertRetireQueueOwner).
 		std::vector<RetireEntry> m_RetireQueue;
 		// The per-slot record-start reset counts (the submit thread's
 		// NoteSlotReset bumps them after the command buffers free) - the

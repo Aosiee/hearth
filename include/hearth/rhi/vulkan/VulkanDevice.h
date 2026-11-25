@@ -40,8 +40,7 @@ namespace hearth::rhi {
 		// pools, profiling bookkeeping). The frame-index space every
 		// per-frame-in-flight array in the backend is sized against is
 		// TotalFrameSlots; a window's frame N lives at slot*FramesInFlight+N.
-		// The fixed slot count is a v1 simplification - per-window ownership
-		// replaces the slotting wholesale rather than this becoming dynamic.
+		// The slot count is fixed (MaxWindowSlots windows at once).
 		static constexpr uint32_t MaxWindowSlots = 4;
 		static constexpr uint32_t TotalFrameSlots = FramesInFlight * MaxWindowSlots;
 
@@ -51,10 +50,10 @@ namespace hearth::rhi {
 
 		// Reserves the lowest free window slot and returns its base frame index
 		// (slotIndex * FramesInFlight). Must be called between frames (a
-		// window context's creation), never while another window's
+		// window's creation), never while another window's
 		// submission is in flight. Asserts when every slot is claimed.
 		// The slot records its owning context until ReleaseWindowSlot (the
-		// context's destructor), so the game-thread parks can wait EVERY live
+		// context's destructor), so the loop thread's parks can wait EVERY live
 		// window, not only the main one.
 		// A released slot is handed out again only after RecycleWindowSlot -
 		// the old owner's destructor calls it once its last GPU work has
@@ -64,29 +63,29 @@ namespace hearth::rhi {
 		void ReleaseWindowSlot(uint32_t slotBase);
 		void RecycleWindowSlot(uint32_t slotBase);
 		// The live window contexts, indexed by window slot (null = never
-		// allocated or released). Game-thread-only, like the allocation.
+		// allocated or released). Loop-thread-only, like the allocation.
 		const std::array<VulkanWindowContext*, MaxWindowSlots>& GetLiveWindowContexts() const { return m_WindowContexts; }
 
 		// The main window's context, owned here, beside the window-slot
-		// table (formerly the file-scope s_MainVulkanContext). Set exactly
-		// once, by the Init of the context created with
-		// WindowProps::IsMainWindow (the flag, whatever window slot it
-		// holds; a secondary window never sets it); cleared by that
+		// table. Set exactly once, by the Init of the context whose
+		// IsMainWindow is true (the flag, whatever window slot it holds; a
+		// secondary window never sets it); cleared by that
 		// context's destructor. The clear is deliberately LATER than
 		// ReleaseWindowSlot's table entry: the main context's own teardown
 		// joins its submit thread, whose last record still reads the main
-		// context. Written on the game thread between frames; read on the
-		// game thread and inside record jobs (the same access as before).
+		// context. Written on the loop thread between frames; read on the
+		// loop thread and inside record jobs.
 		void SetMainContext(VulkanWindowContext* context);
 		void ClearMainContext(VulkanWindowContext* context);
 		VulkanWindowContext* TryGetMainContext() const { return m_MainContext; }
-		// Asserts the main context exists (a null main context in a
-		// windowed flavor is a bug, not a case).
+		// Asserts the main context exists (a null main context once the
+		// main window is up is a bug, not a case).
 		VulkanWindowContext& GetMainContext() const;
 
-		// The game thread: the thread that created the device (the first
-		// window context's creation). The transient pool and the upload
-		// batch below are game-thread-only.
+		// The loop thread (named the game thread here): the thread that
+		// created the device (the first window's creation) and runs the
+		// frame loop. The transient pool and the upload batch below are
+		// loop-thread-only.
 		bool IsGameThread() const { return std::this_thread::get_id() == m_GameThreadId; }
 
 		// windowForExtensionQuery is only used to ask GLFW which instance extensions
@@ -108,9 +107,9 @@ namespace hearth::rhi {
 		VkQueue GetGraphicsQueue() const { return m_GraphicsQueue; }
 		uint32_t GetGraphicsQueueFamily() const { return m_GraphicsQueueFamily; }
 
-		// T-F-C: the queue is externally synchronized - once the frame's
-		// submit/present move to the dedicated submit thread, every
-		// queue-touching call on any thread (the game thread's
+		// The queue is externally synchronized - with the frame's
+		// submit/present on a dedicated submit thread, every
+		// queue-touching call on any thread (the loop thread's
 		// EndSingleTimeCommands uploads, the submit thread's
 		// submit/present, the Recreate device-wait) holds this.
 		std::mutex& GetQueueMutex() { return m_QueueMutex; }
@@ -127,8 +126,8 @@ namespace hearth::rhi {
 			return m_CommandPools[poolIndex];
 		}
 
-		// ---- P-A2: the graphics-queue timeline -----------------------------
-		// One timeline semaphore replaces the per-frame fences for pacing and
+		// ---- The graphics-queue timeline -----------------------------------
+		// One timeline semaphore (no per-frame fences) does the pacing and
 		// in-flight tracking; binary semaphores remain ONLY for swapchain
 		// acquire/present. Every submission signals the timeline at a fresh
 		// value; waiters block until the GPU passes it.
@@ -161,12 +160,12 @@ namespace hearth::rhi {
 		// every Vulkan implementation is required to support, unlike GL where
 		// GL_TEXTURE_MAX_ANISOTROPY is just always there to query a limit from.
 		// Checked once at device creation and requested if available; callers
-		// (VulkanTexture2D's sampler) need to check this rather than assume it's
+		// (VulkanImage2D's sampler) need to check this rather than assume it's
 		// on, requesting VK_TRUE without the feature enabled is a validation error.
 		bool IsSamplerAnisotropySupported() const { return m_SamplerAnisotropySupported; }
 
-		// Non-solid polygon modes (VK_POLYGON_MODE_LINE - the wireframe debug
-		// view's pipeline) are an optional device feature too. Checked once
+		// Non-solid polygon modes (VK_POLYGON_MODE_LINE - a wireframe
+		// pipeline) are an optional device feature too. Checked once
 		// at device creation and requested if available; requesting LINE
 		// without the feature enabled is VUID-...-polygonMode-01507.
 		bool IsFillModeNonSolidSupported() const { return m_FillModeNonSolidSupported; }
@@ -174,13 +173,13 @@ namespace hearth::rhi {
 		// Thin wrapper over vkSetDebugUtilsObjectNameEXT. Safe to call even when
 		// validation/debug utils aren't active, it just becomes a no-op, so callers
 		// don't need to guard every call site themselves. This is what makes a
-		// RenderDoc/Nsight capture and the in-editor GPU frame debugger show real
-		// names instead of raw handles.
+		// RenderDoc/Nsight capture and a frame debugger show real names
+		// instead of raw handles.
 		void SetObjectName(VkObjectType type, uint64_t handle, const std::string& name) const;
 
 		// Wraps a stretch of recorded commands in a named, coloured label. Shows up
 		// as a group in RenderDoc/Nsight captures. Also where GPU timing for the
-		// in-editor GPU frame debugger comes from - every Begin/End call site gets
+		// program's frame debugger comes from - every Begin/End call site gets
 		// per-pass GPU timestamps.
 		// timed = false records the label without a timestamp pair (the scope stack
 		// carries the no-slot sentinel, as on an overflow).
@@ -191,13 +190,13 @@ namespace hearth::rhi {
 		void CmdEndDebugLabel(VkCommandBuffer commandBuffer, uint32_t frameSlot);
 
 		// Call once per application frame, right after that frame-in-flight
-		// slot's fence has been waited on (VulkanSwapchain::AcquireNextImage)
-		// and before any new recording for it begins. Reads back GPU
-		// timestamps from the *previous* time this slot was used (guaranteed
-		// complete by the fence wait) into GpuFrameDebugInfo, then clears this
+		// slot's timeline wait (VulkanSwapchain::AcquireNextImage) and before
+		// any new recording for it begins. Reads back GPU timestamps from
+		// the *previous* time this slot was used (guaranteed complete by
+		// that wait) into GpuFrameDebugInfo, then clears this
 		// slot's bookkeeping ready for new Begin/EndDebugLabel calls this frame.
-		// isMainWindow gates the GpuFrameDebugInfo sink (the one the editor's
-		// GPU frame debugger reads) - secondary windows still get
+		// isMainWindow gates the GpuFrameDebugInfo sink (the one the
+		// program's frame debugger reads) - secondary windows still get
 		// their own per-slot bookkeeping, they just don't publish into it.
 		void BeginProfilingFrame(uint32_t frameIndex, bool isMainWindow = true);
 
@@ -208,32 +207,25 @@ namespace hearth::rhi {
 		void CmdResetTimestampPool(VkCommandBuffer commandBuffer, uint32_t frameIndex);
 
 		// The frame-indexed timestamp pool (the RHI's WriteTimestamp
-		// routes through this; the P-A2 frame-sync rework re-keys it).
+		// routes through this).
 		VkQueryPool GetTimestampPool(uint32_t frameIndex) const
 		{
 			HEARTH_ASSERT(frameIndex < m_TimestampPools.size() && m_TimestampPools[frameIndex] != VK_NULL_HANDLE, "Timestamp pool index out of range!");
 			return m_TimestampPools[frameIndex];
 		}
 
-		// Not tied to the command buffer at all (this is host-side
-		// bookkeeping only), used to populate the GPU frame debugger's
-		// barrier list. Only called at the handful of always-present,
-		// per-frame barrier sites (swapchain clear, editor viewport target),
-		// not one-off resource upload barriers — see GpuFrameDebugData.h.
-
-
 		// Used for one-off resource setup work that doesn't happen inside the
-		// normal per-frame recording, buffer/texture uploads mainly. Game
+		// normal per-frame recording, buffer/texture uploads mainly. Loop
 		// thread only (asserted - the transient pool and the upload batch
-		// are not synchronized; the submit thread's swapchain transition
-		// uses the swapchain's own pool). Allocates
+		// are not synchronized; the swapchain's depth transition uses the
+		// swapchain's own pool). Allocates
 		// from a dedicated transient pool (separate from the per-frame-in-flight
 		// pools, which get reset wholesale every frame and would be the wrong
 		// place for something that might outlive a single frame's turnaround),
 		// records nothing itself, and blocks until the GPU has finished before
 		// returning from EndSingleTimeCommands. That's an intentional
 		// simplification: resource uploads happen rarely enough (texture/mesh
-		// load, not every frame) that stalling for them is fine for now, an async
+		// load, not every frame) that stalling for them is acceptable, an async
 		// transfer queue can replace this later if upload volume ever justifies it.
 		VkCommandBuffer BeginSingleTimeCommands();
 		void EndSingleTimeCommands(VkCommandBuffer commandBuffer);
@@ -245,9 +237,9 @@ namespace hearth::rhi {
 		// EndUploadBatch ends + submits it once on the graphics queue
 		// WITHOUT a device waitIdle (the queue's submission order + the
 		// frame's acquire timeline wait order it before the frame that
-		// samples the uploads). Game thread only, like the single-time
-		// commands (the batch is the m_UploadBatch member, formerly a
-		// thread_local; every entry point asserts the game thread).
+		// samples the uploads). Loop thread only, like the single-time
+		// commands (the batch is the m_UploadBatch member; every entry
+		// point asserts the loop thread).
 		// A batch with no recorded commands submits nothing.
 		void BeginUploadBatch();
 		void EndUploadBatch();
@@ -257,7 +249,7 @@ namespace hearth::rhi {
 		// them: the batch's recorded copies still reference them, and they
 		// die only once the GPU has passed the batch's submission (the
 		// timeline). Returns false when no batch is active - the caller
-		// destroys the staging itself, exactly as before.
+		// destroys the staging itself.
 		bool BatchRetireStaging(VkBuffer buffer, VmaAllocation allocation);
 
 	private:
@@ -294,7 +286,7 @@ namespace hearth::rhi {
 		uint32_t m_RecordThreadCount = 1;
 		VkCommandPool m_TransientCommandPool = VK_NULL_HANDLE;
 
-		// P-A2: the graphics-queue timeline (see the accessors above).
+		// The graphics-queue timeline (see the accessors above).
 		VkSemaphore m_TimelineSemaphore = VK_NULL_HANDLE;
 		std::atomic<uint64_t> m_TimelineValue{ 0 };
 
@@ -333,15 +325,15 @@ namespace hearth::rhi {
 		// GPU frame debugger timing.
 		// One query pool per frame slot (window slot * FramesInFlight), same
 		// reasoning as the command pools: reusing slot N is only safe once
-		// frame N's fence has signalled, which BeginProfilingFrame's caller
-		// already guarantees.
-		// One TOP+BOTTOM timestamp pair per GPU scope; the editor's UI alone
-		// can split into dozens of batches (every clip rect + pipeline change
-		// is its own scope since the Wisp per-batch labels landed), so this is
-		// generous rather than minimal. The per-frame query pools are sized
+		// frame N's timeline value has passed, which BeginProfilingFrame's
+		// caller already guarantees.
+		// One TOP+BOTTOM timestamp pair per GPU scope; a UI renderer that
+		// labels every batch (every clip rect + pipeline change its own
+		// scope) can split into dozens alone, so this is generous rather
+		// than minimal. The per-frame query pools are sized
 		// from it and are cheap.
 		static constexpr uint32_t kMaxTimestampsPerFrame = 1024;
-		static constexpr uint32_t kNoTimestampSlot = ~0u; // a label recorded without timing (A10)
+		static constexpr uint32_t kNoTimestampSlot = ~0u; // a label recorded without timing
 		std::atomic<bool> m_TimestampOverflowWarned{ false };
 		void NoteTimestampOverflow();
 
@@ -373,8 +365,7 @@ namespace hearth::rhi {
 		void DetectCalibratedTimestamps();
 		void CalibrateGpuClock();
 		uint32_t m_MaxPushConstantsSize = 128;
-		// The capture sidecar's GPU identity (the CI golden-source
-		// policy keys on it).
+		// The device's identity (for a program's capture metadata).
 		std::string m_DeviceName;
 		uint32_t m_DriverVersion = 0;
 		uint32_t m_ApiVersion = 0;
@@ -382,8 +373,7 @@ namespace hearth::rhi {
 	public:
 		float GetTimestampPeriodNs() const { return m_TimestampPeriodNs; }
 		uint32_t GetMaxPushConstantsSize() const { return m_MaxPushConstantsSize; }
-		// The capture sidecar's GPU identity (the CI golden-source
-		// policy keys on it).
+		// The device's identity (for a program's capture metadata).
 		const std::string& GetDeviceName() const { return m_DeviceName; }
 		uint32_t GetDriverVersion() const { return m_DriverVersion; }
 		uint32_t GetApiVersion() const { return m_ApiVersion; }
@@ -391,10 +381,11 @@ namespace hearth::rhi {
 		uint32_t GetRecordThreadCount() const { return m_RecordThreadCount; }
 	private:
 
-		// T-F-B.3: the calling thread's record index, clamped into
-		// [0, m_RecordThreadCount). The pool workers are configured 1:1
-		// with the pool slots (LoomPool), so this maps uniquely; helping
-		// threads outside the range share the clamp defensively.
+		// The calling thread's record index (its loom thread index),
+		// clamped into [0, m_RecordThreadCount). The program configures its
+		// loom pool's workers 1:1 with the record pools, so this maps
+		// uniquely; a thread outside the range shares the clamp
+		// defensively (and asserts in dev).
 		uint32_t RecordThreadIndex() const;
 
 		std::vector<VkQueryPool> m_TimestampPools;

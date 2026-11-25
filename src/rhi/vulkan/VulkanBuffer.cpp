@@ -72,8 +72,7 @@ namespace hearth::rhi {
 
 		// Inside an upload batch the recorded copy still references this
 		// staging - hand it to the batch (it dies once the GPU passes the
-		// batch's submission). Outside a batch, destroy it now exactly as
-		// before.
+		// batch's submission). Outside a batch, destroy it now.
 		if (!m_Device->BatchRetireStaging(staging.GetHandle(), staging.GetAllocation()))
 			staging.Shutdown();
 	}

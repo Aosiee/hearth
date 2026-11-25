@@ -44,7 +44,7 @@ namespace hearth::rhi {
 			else if (severity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
 				severityText = "WARN";
 
-			// T-F-C: the messenger fires on whichever thread made the call -
+			// The messenger fires on whichever thread made the call -
 			// the append serializes with the submit thread's frame writes
 			// (the sink's lock).
 			GpuFrameDebugSink::Writer debug = sink->Write();
@@ -62,9 +62,9 @@ namespace hearth::rhi {
 		{
 			(void)type;
 
-			// F6: log the VUID id alongside the message - the pMessage-only
-			// log dropped the VUID name, which let THREADING ERRORs (no VUID
-			// token in pMessage) escape the log-grep gates entirely.
+			// Log the VUID id alongside the message - pMessage alone drops
+			// the VUID name, which lets THREADING ERRORs (no VUID token in
+			// pMessage) escape a log grep entirely.
 			const char* messageId = callbackData->pMessageIdName ? callbackData->pMessageIdName : "<no-id>";
 			switch (severity)
 			{
@@ -82,8 +82,8 @@ namespace hearth::rhi {
 					break;
 			}
 
-			// The sink travels as the messenger's pUserData (the RhiDevice
-			// subsystem's member).
+			// The sink travels as the messenger's pUserData (the program's
+			// sink, set before Init).
 			BufferValidationMessage(static_cast<GpuFrameDebugSink*>(userData), severity, callbackData->pMessage);
 
 			// Returning true here would abort the call that triggered the message,
@@ -102,9 +102,9 @@ namespace hearth::rhi {
 		// - the surface-dependent selections below skip the present
 		// requirement and the swapchain extension.
 		m_SurfaceEnabled = windowForExtensionQuery != nullptr;
-		// The creating thread is the game thread (the first window's
-		// window context's creation); the single-time commands and the upload
-		// batch assert it from here on.
+		// The creating thread is the loop thread (the first window's
+		// creation); the single-time commands and the upload batch assert it
+		// from here on.
 		m_GameThreadId = std::this_thread::get_id();
 
 		VK_CHECK(volkInitialize());
@@ -130,8 +130,8 @@ namespace hearth::rhi {
 		CreateCommandPools();
 		// The timeline semaphore must exist before the timestamp pools
 		// - each pool's one-time reset submits through
-		// EndSingleTimeCommands, which now signals + waits on the
-		// timeline (the old order handed it a null semaphore).
+		// EndSingleTimeCommands, which signals + waits on the timeline
+		// (created later, it would be handed a null semaphore).
 		CreateTimelineSemaphore();
 		CreateTimestampQueryPools();
 	}
@@ -410,8 +410,7 @@ namespace hearth::rhi {
 		VkPhysicalDeviceProperties properties;
 		vkGetPhysicalDeviceProperties(m_PhysicalDevice, &properties);
 		HEARTH_LOG_INFO(::hearth::LogVulkan, "Vulkan Physical Device: {0}", properties.deviceName);
-		// The capture sidecar's GPU identity (the CI golden-source
-		// policy's key).
+		// The device's identity (for a program's capture metadata).
 		m_DeviceName = properties.deviceName;
 		m_DriverVersion = properties.driverVersion;
 		m_ApiVersion = properties.apiVersion;
@@ -422,15 +421,16 @@ namespace hearth::rhi {
 		::hearth::host::NoteGpu(properties.deviceName, driver);
 
 		// Needed to convert GPU timestamp query results (raw ticks) into
-		// milliseconds for the GPU frame debugger. timestampValidBits == 0 on
+		// milliseconds for a frame debugger. timestampValidBits == 0 on
 		// the chosen queue family would mean timestamps aren't supported there
 		// at all, rare but not impossible, checked rather than assumed the
 		// way samplerAnisotropy is.
 		m_TimestampPeriodNs = properties.limits.timestampPeriod;
 
-		// P-C: the mesh/debug push blocks reach 132 bytes; the spec minimum
-		// is 128, so the RHI checks this at Init rather than discovering it
-		// as a vkCreatePipelineLayout validation error.
+		// Push blocks can exceed the spec minimum of 128 bytes (a program's
+		// may reach 132), so the device records the limit at Init
+		// (GetMaxPushConstantsSize) for the caller to check rather than
+		// discover it as a vkCreatePipelineLayout validation error.
 		m_MaxPushConstantsSize = properties.limits.maxPushConstantsSize;
 
 		uint32_t queueFamilyCount = 0;
@@ -570,13 +570,13 @@ namespace hearth::rhi {
 		// Dynamic rendering and synchronization2 are Vulkan 1.3 core features rather
 		// than extensions, but still need to be explicitly turned on per device.
 		// Descriptor indexing and timeline semaphores (1.2 core) are also
-		// enabled, for Renderer2D's bindless texture array.
+		// enabled, for the bindless descriptor arrays.
 		VkPhysicalDeviceVulkan13Features vulkan13Features{};
 		vulkan13Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 		vulkan13Features.dynamicRendering = VK_TRUE;
 		vulkan13Features.synchronization2 = VK_TRUE;
-		// The gizmo overlay fragment shader uses `discard` alongside fwidth()
-		// derivatives; glslang emits OpDemoteToHelperInvocation for that
+		// A fragment shader that uses `discard` alongside fwidth()
+		// derivatives makes glslang emit OpDemoteToHelperInvocation for that
 		// combination (demote keeps helper invocations alive so the
 		// derivative is still correct), which needs this feature enabled.
 		// Core in Vulkan 1.3 (promoted from VK_EXT_shader_demote_to_helper_invocation),
@@ -659,12 +659,11 @@ namespace hearth::rhi {
 
 	void VulkanDevice::CreateCommandPools()
 	{
-		// P-A2: pools are keyed by (frame slot, record thread). T-F-B.3: the
-		// count covers the main thread + every Loom pool worker 1:1 (loom
-		// assigns 0 to the main thread and 1..workerCount to the workers;
-		// the clamped RecordThreadIndex is the defensive fallback for any
-		// helping thread beyond the range - none exist in the tree today,
-		// and lanes never steal).
+		// Pools are keyed by (frame slot, record thread). The count covers
+		// the main thread + every loom pool worker 1:1 (loom assigns 0 to
+		// the main thread and 1..workerCount to the workers; the clamped
+		// RecordThreadIndex is the defensive fallback for any helping
+		// thread beyond the range).
 		uint32_t hardwareThreads = std::thread::hardware_concurrency() == 0
 			? 1u
 			: (uint32_t)std::thread::hardware_concurrency();
@@ -704,7 +703,7 @@ namespace hearth::rhi {
 	void VulkanDevice::CreateTimestampQueryPools()
 	{
 		m_TimestampPools.resize(TotalFrameSlots, VK_NULL_HANDLE);
-		// T-F-B.3: the counters are per frame slot (atomic - the parallel
+		// The counters are per frame slot (atomic - the parallel
 		// record workers allocate slots concurrently; the fetch_add keeps
 		// the used prefix contiguous so the readback stays one range); the
 		// scope stacks + recorded scopes are per (frame slot, record thread).
@@ -853,8 +852,8 @@ namespace hearth::rhi {
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = &m_TimelineSemaphore;
 
-		// T-F-C: the queue is externally synchronized - the game-thread
-		// uploads and the submit thread's frame submits serialize on it.
+		// The queue is externally synchronized - the loop thread's uploads
+		// and the submit thread's frame submits serialize on it.
 		// The timeline VALUE is allocated inside the lock (the same
 		// VUID-VkSubmitInfo-pSignalSemaphores-03242 ordering the batch
 		// honours).
@@ -865,7 +864,7 @@ namespace hearth::rhi {
 		}
 
 		// Wait for THIS submission only (not the whole queue): a one-off
-		// upload no longer drains every in-flight frame, and any frame
+		// upload does not drain every in-flight frame, and any frame
 		// submitted after it is not stalled. The staging is reclaimed by
 		// the caller once this returns.
 		WaitForTimelineValue(signalValue);
@@ -1016,17 +1015,16 @@ namespace hearth::rhi {
 		{
 			HEARTH_ASSERT(frameSlot < TotalFrameSlots, "CmdBeginDebugLabel frame index out of range!");
 
-			// T-F-B.3: the slot counter is per frame + atomic (the parallel
-			// record workers allocate concurrently); fetch_add keeps the used
+			// The slot counter is per frame + atomic (the parallel record
+			// workers allocate concurrently); fetch_add keeps the used
 			// prefix contiguous for the single-range readback. Running out of
 			// slots is a counted, recoverable condition - the label still
 			// records, only its timing is skipped (the sentinel on the scope
-			// stack). The old assert crashed the dev editor on any frame with
-			// ~500+ labelled scopes (Wisp labels every draw batch - the
-			// profiler panel at deep zoom), and builds without asserts wrote
-			// past the query pool. An untimed label (F1) takes the same
-			// sentinel, so the stack stays paired and its end writes no
-			// timestamp either.
+			// stack): a frame with ~500+ labelled scopes is legitimate (a UI
+			// renderer labelling every draw batch), and writing past the
+			// query pool is not. An untimed label takes the same sentinel,
+			// so the stack stays paired and its end writes no timestamp
+			// either.
 			uint32_t slot = kNoTimestampSlot;
 			if (timed)
 			{
@@ -1069,7 +1067,7 @@ namespace hearth::rhi {
 				std::string scopeName = m_ScopeNameStack[threadKey].back();
 				m_ScopeNameStack[threadKey].pop_back();
 
-				// A10: an untimed begin stays untimed; an end that finds no
+				// An untimed begin stays untimed; an end that finds no
 				// slot drops the scope's timing (never a write past the pool).
 				uint32_t endSlot = kNoTimestampSlot;
 				if (beginSlot != kNoTimestampSlot)
@@ -1115,7 +1113,7 @@ namespace hearth::rhi {
 		GpuFrameDebugInfo& debugInfo = debug ? debug->Info : scratch;
 #endif // HEARTH_GPU_DEBUG
 
-		// The counter keeps counting past the pool on an overflow frame (A10).
+		// The counter keeps counting past the pool on an overflow frame.
 		uint32_t queryCount = std::min(m_NextQuerySlot[frameIndex].load(std::memory_order_relaxed), kMaxTimestampsPerFrame);
 
 		if (isMainWindow && m_TimestampsSupported && queryCount > 0)
@@ -1123,9 +1121,9 @@ namespace hearth::rhi {
 			std::vector<uint64_t> timestamps(queryCount);
 
 			// These queries are guaranteed complete: the caller only reaches
-			// here after waiting on this exact frame-in-flight slot's fence
-			// (VulkanSwapchain::AcquireNextImage), which can't have signalled
-			// until all of this slot's previous GPU work, timestamp writes
+			// here after waiting on this exact frame-in-flight slot's
+			// timeline value (VulkanSwapchain::AcquireNextImage), which can't
+			// have passed until all of this slot's previous GPU work, timestamp writes
 			// included, finished. The atomic fetch_add allocation keeps the
 			// used slots a contiguous [0, queryCount) prefix.
 			VkResult result = vkGetQueryPoolResults(m_Device, m_TimestampPools[frameIndex], 0, queryCount,
@@ -1143,7 +1141,7 @@ namespace hearth::rhi {
 				// The profiler's GPU lane: the tick pairs + the
 				// originating frame, in the device-ns domain (the viewer
 				// anchors on the frame; the tooltip converts via the
-				// period). T-F-B.3: the scopes merge per-thread
+				// period). The scopes merge per-thread
 				// (thread-major, then recording order) - still fully
 				// deterministic.
 				for (uint32_t thread = 0; thread < m_RecordThreadCount; thread++)
@@ -1221,9 +1219,9 @@ namespace hearth::rhi {
 		int index = loom::CurrentThreadIndex();
 		if (index < 0)
 			index = 0;
-		// The dev assert catches the pool-count mismatch the silent clamp
-		// used to hide (two threads sharing one pool); the clamp stays
-		// the release-only fallback.
+		// The dev assert catches a pool-count mismatch (two threads sharing
+		// one pool) the silent clamp would hide; the clamp is the
+		// release-only fallback.
 		HEARTH_ASSERT((uint32_t)index < m_RecordThreadCount,
 			"the loom thread index exceeds the record pool count");
 		return (uint32_t)index < m_RecordThreadCount ? (uint32_t)index : m_RecordThreadCount - 1;

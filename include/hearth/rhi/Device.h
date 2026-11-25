@@ -1,10 +1,8 @@
 #pragma once
 
-// The Device surface. One per process, owned by the EngineScope
-// `RhiDevice` subsystem. Wrap-first semantics: every create/destroy maps
-// onto the existing Vulkan classes with no behaviour change; destroy is
-// deferred through the retire queue once the persistent bindless set
-// lands.
+// The Device surface. One per process, owned by the program. Every
+// create/destroy maps onto the Vulkan classes under hearth/rhi/vulkan;
+// destroy is deferred through the retire queue.
 
 #include "hearth/rhi/Types.h"
 #include "hearth/rhi/States.h"
@@ -144,11 +142,11 @@ namespace hearth::rhi {
 		// cooker baked them); one buffer->image copy per level, no blits.
 		virtual TextureHandle CreateTextureFromBakedMips(uint32_t width, uint32_t height,
 			const std::vector<std::vector<uint8_t>>& mipLevels, const char* debugName) = 0;
-		// P-D: wraps an image the CALLER owns (a framebuffer's colour
+		// Wraps an image the CALLER owns (a framebuffer's colour
 		// attachment) as a samplable texture - the RHI owns only the view +
 		// bindless slot; DestroyTexture releases just those.
 		virtual TextureHandle CreateTextureFromNativeImage(void* nativeImage, uint32_t width, uint32_t height, Format format) = 0;
-		// P4-B: adopts an externally-owned image as a barrier target only
+		// Adopts an externally-owned image as a barrier target only
 		// (no view, no bindless slot - the swapchain images). Destroy
 		// releases the handle; nothing is destroyed.
 		virtual TextureHandle AdoptExternalImage(void* nativeImage) = 0;
@@ -202,19 +200,21 @@ namespace hearth::rhi {
 		// are gathered into ONE submission at End - submitted without a
 		// device waitIdle, so the frame that samples them is ordered after
 		// them by the queue itself (the one-graphics-timeline invariant).
-		// Game-thread-only (the promotion runs at the frame boundary);
+		// Loop-thread-only (the promotion runs at the frame boundary);
 		// End is a no-op submit if nothing recorded.
 		virtual void BeginUploadBatch() = 0;
 		virtual void EndUploadBatch() = 0;
 
-		// v1: submits through the existing binary-semaphore/fence frame path;
-		// timeline waits/signals become meaningful in P-A2.
+		// Submits on the graphics queue's timeline: every wait and signal
+		// names that one semaphore, so several entries collapse to the
+		// largest value. Signals a fresh value when none is given and
+		// returns the value signalled.
 		virtual uint64_t Submit(QueueHandle queue, std::span<const CommandListHandle> commandLists,
 			std::span<const TimelineWait> waits, std::span<const TimelineSignal> signals) = 0;
 
-		virtual void WaitIdle() = 0; // public use is dev-only; the subsystem idles internally on shutdown
+		virtual void WaitIdle() = 0; // public use is dev-only; the device idles internally on shutdown
 
-		virtual SwapchainHandle CreateSwapchain(void* window) = 0; // P-A2 wires the per-window path
+		virtual SwapchainHandle CreateSwapchain(void* window) = 0;
 		virtual void DestroySwapchain(SwapchainHandle handle) = 0;
 	};
 

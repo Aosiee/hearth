@@ -6,8 +6,9 @@
 // BeginRendering, a compute dispatch, a copy). Compile
 // produces a topological order, culls passes whose outputs are never
 // consumed, derives the minimal barrier set between consecutive users, and
-// Execute replays the plan on a CommandList. v1: single-threaded Execute,
-// no aliasing - every virtual transient owns its own physical texture,
+// Execute replays the plan on one CommandList (single-threaded; RecordPass
+// is the per-pass surface a host fans out). No aliasing - every virtual
+// transient owns its own physical texture,
 // reused across frames through the pool (which also carries each texture's
 // state forward so the next frame's derivation seeds from where the last
 // one left it).
@@ -100,7 +101,7 @@ namespace hearth::rg {
 			return ((uint64_t)graphId << 32) | textureIndex;
 		}
 
-		// The prepare-stage creation (T-F-B.3): called on the record host's
+		// The prepare-stage creation: called on the record host's
 		// thread before the fan-out - never from a RecordPass.
 		TextureHandle GetOrCreate(Device& device, uint64_t key, const TextureDesc& desc, const char* debugName);
 		// The record-stage lookup: pure read, asserts the prepare stage
@@ -128,7 +129,7 @@ namespace hearth::rg {
 		RenderGraph& operator=(const RenderGraph&) = delete;
 
 		// External resources (the swapchain image, framebuffer targets,
-		// engine textures): the graph tracks their state from `currentState`
+		// the program's own textures): the graph tracks their state from `currentState`
 		// and derives barriers against it. The final state at the end of the
 		// frame is whatever the last user leaves.
 		RGTexture Import(TextureHandle handle, TextureState currentState);
@@ -165,12 +166,12 @@ namespace hearth::rg {
 		// The transient states seed from the pool's recorded last states.
 		void Compile();
 
-		// T-F-B.3: the prepare stage creates every transient texture up
+		// The prepare stage creates every transient texture up
 		// front (single-threaded, on the record host) so RecordPass is a
 		// pure read and can fan out to workers. Call after Compile.
 		void PreCreateTransients(Device& device);
 
-		// T-F-B.3: the single-threaded frame-end carry - the transients'
+		// The single-threaded frame-end carry - the transients'
 		// final states feed the next frame's seeding. Execute calls it at
 		// its tail; the threaded host calls it after the fan-out.
 		void RecordFinalStates();
@@ -205,9 +206,9 @@ namespace hearth::rg {
 		struct CompiledBarrier
 		{
 			std::string PassName;
-			// The pass's position in the compiled order (NOT its name - the
-			// editor registers same-named passes per framebuffer target, so
-			// the name is not unique; RecordPass keys on this).
+			// The pass's position in the compiled order (NOT its name - a
+			// program may register same-named passes per framebuffer
+			// target, so the name is not unique; RecordPass keys on this).
 			uint32_t OrderIndex = 0;
 			// A texture barrier (TextureIndex, From, To) or, with IsBuffer, a
 			// buffer one (BufferIndex, BufferFrom, BufferTo).

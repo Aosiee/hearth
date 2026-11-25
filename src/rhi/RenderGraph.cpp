@@ -191,9 +191,9 @@ namespace hearth::rg {
 
 		// Propagate liveness backward: any pass that wrote a texture a live
 		// pass reads is itself live. EVERY writer of the texture must be
-		// marked - the old break-after-first-writer culled a texture's
-		// second writer, so a same-layout WAW chain silently dropped its
-		// later passes (the WAW test exposed it).
+		// marked - stopping at the first writer would cull a texture's
+		// second writer, so a same-layout WAW chain would silently drop its
+		// later passes (the WAW test covers it).
 		for (size_t cursor = 0; cursor < live.size(); cursor++)
 		{
 			const Pass& consumer = m_Passes[live[cursor]];
@@ -414,7 +414,7 @@ namespace hearth::rg {
 		return m_Textures[texture.Index].State;
 	}
 
-	// T-F-B.3: the prepare-stage creation. Single-threaded by contract (the
+	// The prepare-stage creation. Single-threaded by contract (the
 	// host calls it after Compile, before the fan-out).
 	void RenderGraph::PreCreateTransients(Device& device)
 	{
@@ -425,7 +425,7 @@ namespace hearth::rg {
 		}
 	}
 
-	// T-F-B.3: the single-threaded frame-end carry.
+	// The single-threaded frame-end carry.
 	void RenderGraph::RecordFinalStates()
 	{
 		for (uint32_t i = 0; i < m_Textures.size(); i++)
@@ -437,8 +437,8 @@ namespace hearth::rg {
 
 	PassResources RenderGraph::ResolveResources(Device& device, const Pass& pass)
 	{
-		(void)device; // T-F-B.3: resolution is a pure pool lookup now; the
-					  // parameter stays for the host-facing RecordPass surface.
+		(void)device; // resolution is a pure pool lookup; the parameter
+					  // stays for the host-facing RecordPass surface.
 		PassResources resources;
 		for (const AccessRecord& access : pass.Accesses)
 		{
@@ -477,20 +477,19 @@ namespace hearth::rg {
 	// The per-pass record: the pass's compiled barriers (the schedule
 	// derived at Compile - one Barrier call) + its ExecuteFn. The barrier
 	// set for the pass is its CompiledBarrier records (each one texture);
-	// they batch into one Barrier call exactly like Execute did. The
+	// they batch into one Barrier call. The
 	// transient handles resolve here via the pool's PURE LOOKUP - a HOST
 	// that fans the passes onto workers must pre-create the transients via
 	// PreCreateTransients (the prepare stage) before the fan-out.
 	//
-	// The frame slot is the list's (CommandList::FrameSlot) - the old M-A
-	// enter/leave scope around this call (a thread-local) is gone.
+	// The frame slot is the list's (CommandList::FrameSlot); there is no
+	// ambient (thread-local) record state.
 	void RenderGraph::RecordPass(uint32_t orderIndex, Device& device, CommandList& commandList)
 	{
 		Pass& pass = m_Passes[m_Order[orderIndex]];
 
 		// The barrier descriptors point into the textureBarriers vector -
-		// the reserve prevents reallocation invalidating them mid-pass (the
-		// same contract the old Execute held).
+		// the reserve prevents reallocation invalidating them mid-pass.
 		const uint32_t barrierBegin = m_PassBarrierBegin[orderIndex];
 		const uint32_t barrierEnd = m_PassBarrierBegin[orderIndex + 1];
 		std::vector<BarrierDesc> barriers;
@@ -554,7 +553,7 @@ namespace hearth::rg {
 		// The per-texture state machine, walked identically to Compile so
 		// the emitted edges match GetCompiledBarriers() exactly - including
 		// passes without a lambda (their declarations still move state).
-		// T-F-B: the sequential Execute drives the same per-pass RecordPass
+		// The sequential Execute drives the same per-pass RecordPass
 		// surface the threaded host fans out - one code path for the
 		// barrier derivation. It pre-creates its transients up front (the
 		// sequential path is single-threaded either way) and carries the
